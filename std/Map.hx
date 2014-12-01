@@ -26,6 +26,7 @@ import haxe.ds.HashMap;
 import haxe.ds.ObjectMap;
 import haxe.ds.WeakMap;
 import haxe.ds.EnumValueMap;
+import haxe.Constraints.IMap;
 
  /**
 	Map allows key to value mapping for arbitrary value types, and many key
@@ -150,28 +151,17 @@ abstract Map<K,V>(IMap<K,V> ) {
 	}
 
 	@:from static inline function fromStringMap<V>(map:StringMap<V>):Map< String, V > {
-		return map;
+		return cast map;
 	}
 
 	@:from static inline function fromIntMap<V>(map:IntMap<V>):Map< Int, V > {
-		return map;
+		return cast map;
 	}
 
 	@:from static inline function fromObjectMap<K:{ }, V>(map:ObjectMap<K,V>):Map<K,V> {
-		return map;
+		return cast map;
 	}
 }
 
-interface IMap<K,V> {
-	public function get(k:K):Null<V>;
-	public function set(k:K, v:V):Void;
-	public function exists(k:K):Bool;
-	public function remove(k:K):Bool;
-	public function keys():Iterator<K>;
-	public function iterator():Iterator<V>;
-	public function toString():String;
-}
-
-private typedef Hashable = {
-	function hashCode():Int;
-}
+@:deprecated
+typedef IMap<K, V> = haxe.Constraints.IMap<K, V>;

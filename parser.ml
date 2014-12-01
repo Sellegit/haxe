@@ -70,6 +70,7 @@ let unquote_ident f =
 let cache = ref (DynArray.create())
 let last_doc = ref None
 let use_doc = ref false
+let use_parser_resume = ref true
 let resume_display = ref null_pos
 let in_macro = ref false
 
@@ -85,7 +86,7 @@ let display e = raise (Display e)
 
 let is_resuming p =
 	let p2 = !resume_display in
-	p.pmax = p2.pmin && Common.unique_full_path p.pfile = p2.pfile
+	p.pmax = p2.pmin && !use_parser_resume && Common.unique_full_path p.pfile = p2.pfile
 
 let set_resume p =
 	resume_display := { p with pfile = Common.unique_full_path p.pfile }
@@ -369,7 +370,20 @@ let reify in_macro =
 				to_obj fields p
 			) vl p]
 		| EFunction (name,f) ->
-			expr "EFunction" [to_opt to_string name p; to_fun f p]
+			let name = match name with
+				| None ->
+					to_null p
+				| Some name ->
+					if ExtString.String.starts_with name "inline_$" then begin
+						let real_name = (String.sub name 7 (String.length name - 7)) in
+						let e_name = to_string real_name p in
+						let e_inline = to_string "inline_" p in
+						let e_add = (EBinop(OpAdd,e_inline,e_name),p) in
+						e_add
+					end else
+						to_string name p
+			in
+			expr "EFunction" [name; to_fun f p]
 		| EBlock el ->
 			expr "EBlock" [to_expr_array el p]
 		| EFor (e1,e2) ->
@@ -646,6 +660,8 @@ and parse_import s p1 =
 			p2, List.rev acc, INormal
 		| [< '(Kwd In,_); '(Const (Ident name),_); '(Semicolon,p2) >] ->
 			p2, List.rev acc, IAsName name
+		| [< '(Const (Ident "as"),_); '(Const (Ident name),_); '(Semicolon,p2) >] ->
+			p2, List.rev acc, IAsName name
 		| [< >] ->
 			serror()
 	in
@@ -774,8 +790,11 @@ and parse_class_flags = parser
 	| [< '(Kwd Class,p) >] -> [] , p
 	| [< '(Kwd Interface,p) >] -> [HInterface] , p
 
+and parse_type_hint = parser
+	| [< '(DblDot,_); t = parse_complex_type >] -> t
+
 and parse_type_opt = parser
-	| [< '(DblDot,_); t = parse_complex_type >] -> Some t
+	| [< t = parse_type_hint >] -> Some t
 	| [< >] -> None
 
 and parse_complex_type s =
@@ -869,7 +888,7 @@ and parse_complex_type_next t = parser
 
 and parse_type_anonymous opt = parser
 	| [< '(Question,_) when not opt; s >] -> parse_type_anonymous true s
-	| [< name, p1 = ident; '(DblDot,_); t = parse_complex_type; s >] ->
+	| [< name, p1 = ident; t = parse_type_hint; s >] ->
 		let next p2 acc =
 			{
 				cff_name = name;
@@ -898,10 +917,7 @@ and parse_enum s =
 		| [< '(POpen,_); l = psep Comma parse_enum_param; '(PClose,_) >] -> l
 		| [< >] -> []
 		) in
-		let t = (match s with parser
-		| [< '(DblDot,_); t = parse_complex_type >] -> Some t
-		| [< >] -> None
-		) in
+		let t = parse_type_opt s in
 		let p2 = (match s with parser
 			| [< p = semicolon >] -> p
 			| [< >] -> serror()
@@ -917,8 +933,8 @@ and parse_enum s =
 		}
 
 and parse_enum_param = parser
-	| [< '(Question,_); name, _ = ident; '(DblDot,_); t = parse_complex_type >] -> (name,true,t)
-	| [< name, _ = ident; '(DblDot,_); t = parse_complex_type >] -> (name,false,t)
+	| [< '(Question,_); name, _ = ident; t = parse_type_hint >] -> (name,true,t)
+	| [< name, _ = ident; t = parse_type_hint >] -> (name,false,t)
 
 and parse_class_field s =
 	let doc = get_doc s in
@@ -928,10 +944,7 @@ and parse_class_field s =
 		| [< '(Kwd Var,p1); name, _ = dollar_ident; s >] ->
 			(match s with parser
 			| [< '(POpen,_); i1 = property_ident; '(Comma,_); i2 = property_ident; '(PClose,_) >] ->
-				let t = (match s with parser
-					| [< '(DblDot,_); t = parse_complex_type >] -> Some t
-					| [< >] -> None
-				) in
+				let t = parse_type_opt s in
 				let e , p2 = (match s with parser
 				| [< '(Binop OpAssign,_); e = toplevel_expr; p2 = semicolon >] -> Some e , p2
 				| [< '(Semicolon,p2) >] -> None , p2
@@ -995,8 +1008,8 @@ and parse_fun_param_value = parser
 	| [< >] -> None
 
 and parse_fun_param_type = parser
-	| [< '(Question,_); name = ident; '(DblDot,_); t = parse_complex_type >] -> (name,true,t)
-	| [< name = ident; '(DblDot,_); t = parse_complex_type >] -> (name,false,t)
+	| [< '(Question,_); name = ident; t = parse_type_hint >] -> (name,true,t)
+	| [< name = ident; t = parse_type_hint >] -> (name,false,t)
 
 and parse_constraint_params = parser
 	| [< '(Binop OpLt,_); l = psep Comma parse_constraint_param; '(Binop OpGt,_) >] -> l
@@ -1056,7 +1069,7 @@ and block acc s =
 			let tk , pos = (match Stream.peek s with None -> last_token s | Some t -> t) in
 			(!display_error) (Unexpected tk) pos;
 			block acc s
-        | Error (e,p) ->
+		| Error (e,p) ->
 			(!display_error) e p;
 			block acc s
 
@@ -1083,7 +1096,7 @@ and parse_array_decl = parser
 and parse_var_decl = parser
 	| [< name, _ = dollar_ident; t = parse_type_opt; s >] ->
 		match s with parser
-		| [< '(Binop OpAssign,_); e = expr >] -> (name,t,Some e)
+		| [< '(Binop OpAssign,_); s >] -> let e = try expr s with Display e -> e in (name,t,Some e)
 		| [< >] -> (name,t,None)
 
 and inline_function = parser
@@ -1143,7 +1156,7 @@ and expr = parser
 		| [< >] -> serror())
 	| [< '(POpen,p1); e = expr; s >] -> (match s with parser
 		| [< '(PClose,p2); s >] -> expr_next (EParenthesis e, punion p1 p2) s
-		| [< '(DblDot,_); t = parse_complex_type; '(PClose,p2); s >] -> expr_next (EParenthesis (ECheckType(e,t),punion p1 p2), punion p1 p2) s)
+		| [< t = parse_type_hint; '(PClose,p2); s >] -> expr_next (EParenthesis (ECheckType(e,t),punion p1 p2), punion p1 p2) s)
 	| [< '(BkOpen,p1); l = parse_array_decl; '(BkClose,p2); s >] -> expr_next (EArrayDecl l, punion p1 p2) s
 	| [< inl, p1 = inline_function; name = popt dollar_ident; pl = parse_constraint_params; '(POpen,_); al = psep Comma parse_fun_param; '(PClose,_); t = parse_type_opt; s >] ->
 		let make e =
@@ -1211,7 +1224,7 @@ and expr = parser
 	| [< '(Dollar v,p); s >] -> expr_next (EConst (Ident ("$"^v)),p) s
 
 and expr_next e1 = parser
- 	| [< '(BrOpen,p1) when is_dollar_ident e1; eparam = expr; '(BrClose,p2); s >] ->
+	| [< '(BrOpen,p1) when is_dollar_ident e1; eparam = expr; '(BrClose,p2); s >] ->
 		(match fst e1 with
 		| EConst(Ident n) -> expr_next (EMeta((Common.MetaInfo.from_string n,[],snd e1),eparam), punion p1 p2) s
 		| _ -> assert false)
@@ -1254,8 +1267,13 @@ and expr_next e1 = parser
 			make_binop OpGte e1 (secure_expr s)
 		| [< e2 = secure_expr >] ->
 			make_binop OpGt e1 e2)
-	| [< '(Binop op,_); e2 = expr >] ->
-		make_binop op e1 e2
+	| [< '(Binop op,_); s >] ->
+		(try
+			(match s with parser
+			| [< e2 = expr >] -> make_binop op e1 e2
+			| [< >] -> serror())
+		with Display e2 ->
+			raise (Display (make_binop op e1 e2)))
 	| [< '(Unop op,p) when is_postfix e1 op; s >] ->
 		expr_next (EUnop (op,Postfix,e1), punion (pos e1) p) s
 	| [< '(Question,_); e2 = expr; '(DblDot,_); e3 = expr >] ->
@@ -1295,7 +1313,7 @@ and parse_switch_cases eswitch cases = parser
 and parse_catch etry = parser
 	| [< '(Kwd Catch,p); '(POpen,_); name, _ = dollar_ident; s >] ->
 		match s with parser
-		| [< '(DblDot,_); t = parse_complex_type; '(PClose,_); s >] ->
+		| [< t = parse_type_hint; '(PClose,_); s >] ->
 			(try
 				(name,t,secure_expr s)
 			with

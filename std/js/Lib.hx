@@ -41,4 +41,26 @@ class Lib {
 		return untyped __js__("eval")(code);
 	}
 
+	/**
+		Inserts a `require` expression that loads JavaScript object from
+		a module or file specified in the `module` argument.
+
+		This is only supported in environments where `require` function
+		is available, such as Node.js or RequireJS.
+	**/
+	public static inline function require( module:String ) : Dynamic {
+		return untyped __js__("require")(module);
+	}
+
+	/**
+		Returns JavaScript `undefined` value.
+
+		Note that this is only needed in very rare cases when working with external JavaScript code.
+
+		In Haxe, `null` is used to represent the absence of a value.
+	**/
+	public static var undefined(get,never) : Dynamic;
+	static inline function get_undefined() : Dynamic {
+		return untyped __js__("undefined");
+	}
 }

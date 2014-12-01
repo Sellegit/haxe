@@ -91,6 +91,7 @@ and anon_status =
 	| Closed
 	| Opened
 	| Const
+	| Extend of t list
 	| Statics of tclass
 	| EnumStatics of tenum
 	| AbstractStatics of tabstract
@@ -120,7 +121,6 @@ and texpr_expr =
 	| TIf of texpr * texpr * texpr option
 	| TWhile of texpr * texpr * Ast.while_flag
 	| TSwitch of texpr * (texpr list * texpr) list * texpr option
-	| TPatMatch of decision_tree
 	| TTry of texpr * (tvar * texpr) list
 	| TReturn of texpr option
 	| TBreak
@@ -131,7 +131,7 @@ and texpr_expr =
 	| TEnumParameter of texpr * tenum_field * int
 
 and tfield_access =
-	| FInstance of tclass * tclass_field
+	| FInstance of tclass * tparams * tclass_field
 	| FStatic of tclass * tclass_field
 	| FAnon of tclass_field
 	| FDynamic of string
@@ -145,7 +145,7 @@ and texpr = {
 }
 
 and tclass_field = {
-	cf_name : string;
+	mutable cf_name : string;
 	mutable cf_type : t;
 	mutable cf_public : bool;
 	cf_pos : pos;
@@ -177,7 +177,7 @@ and tinfos = {
 	mt_private : bool;
 	mt_doc : Ast.documentation;
 	mutable mt_meta : metadata;
-	mt_types : type_params;
+	mt_params : type_params;
 }
 
 and tclass = {
@@ -187,7 +187,7 @@ and tclass = {
 	mutable cl_private : bool;
 	mutable cl_doc : Ast.documentation;
 	mutable cl_meta : metadata;
-	mutable cl_types : type_params;
+	mutable cl_params : type_params;
 	(* do not insert any fields above *)
 	mutable cl_kind : tclass_kind;
 	mutable cl_extern : bool;
@@ -225,7 +225,7 @@ and tenum = {
 	e_private : bool;
 	e_doc : Ast.documentation;
 	mutable e_meta : metadata;
-	mutable e_types : type_params;
+	mutable e_params : type_params;
 	(* do not insert any fields above *)
 	e_type : tdef;
 	mutable e_extern : bool;
@@ -240,7 +240,7 @@ and tdef = {
 	t_private : bool;
 	t_doc : Ast.documentation;
 	mutable t_meta : metadata;
-	mutable t_types : type_params;
+	mutable t_params : type_params;
 	(* do not insert any fields above *)
 	mutable t_type : t;
 }
@@ -252,15 +252,17 @@ and tabstract = {
 	a_private : bool;
 	a_doc : Ast.documentation;
 	mutable a_meta : metadata;
-	mutable a_types : type_params;
+	mutable a_params : type_params;
 	(* do not insert any fields above *)
 	mutable a_ops : (Ast.binop * tclass_field) list;
 	mutable a_unops : (Ast.unop * unop_flag * tclass_field) list;
 	mutable a_impl : tclass option;
 	mutable a_this : t;
-	mutable a_from : (t * tclass_field option) list;
+	mutable a_from : t list;
+	mutable a_from_field : (t * tclass_field) list;
+	mutable a_to : t list;
+	mutable a_to_field : (t * tclass_field) list;
 	mutable a_array : tclass_field list;
-	mutable a_to : (t * tclass_field option) list;
 }
 
 and module_type =
@@ -318,6 +320,11 @@ let alloc_var =
 	let uid = ref 0 in
 	(fun n t -> incr uid; { v_name = n; v_type = t; v_id = !uid; v_capture = false; v_extra = None; v_meta = [] })
 
+let alloc_unbound_var n t =
+	let v = alloc_var n t in
+	v.v_meta <- [Meta.Unbound,[],null_pos];
+	v
+
 let alloc_mid =
 	let mid = ref 0 in
 	(fun() -> incr mid; !mid)
@@ -326,8 +333,10 @@ let mk e t p = { eexpr = e; etype = t; epos = p }
 
 let mk_block e =
 	match e.eexpr with
-	| TBlock (_ :: _) -> e
+	| TBlock _ -> e
 	| _ -> mk (TBlock [e]) e.etype e.epos
+
+let mk_cast e t p = mk (TCast(e,None)) t p
 
 let null t p = mk (TConst TNull) t p
 
@@ -350,7 +359,7 @@ let mk_class m path pos =
 		cl_kind = KNormal;
 		cl_extern = false;
 		cl_interface = false;
-		cl_types = [];
+		cl_params = [];
 		cl_super = None;
 		cl_implements = [];
 		cl_fields = PMap.empty;
@@ -409,6 +418,25 @@ let null_class =
 	c
 
 let null_field = mk_field "" t_dynamic Ast.null_pos
+
+let null_abstract = {
+	a_path = ([],"");
+	a_module = null_module;
+	a_pos = null_pos;
+	a_private = true;
+	a_doc = None;
+	a_meta = [];
+	a_params = [];
+	a_ops = [];
+	a_unops = [];
+	a_impl = None;
+	a_this = t_dynamic;
+	a_from = [];
+	a_from_field = [];
+	a_to = [];
+	a_to_field = [];
+	a_array = [];
+}
 
 let add_dependency m mdep =
 	if m != null_module && m != mdep then m.m_extra.m_deps <- PMap.add mdep.m_id mdep m.m_extra.m_deps
@@ -544,18 +572,18 @@ let rec follow t =
 	| TLazy f ->
 		follow (!f())
 	| TType (t,tl) ->
-		follow (apply_params t.t_types tl t.t_type)
+		follow (apply_params t.t_params tl t.t_type)
 	| _ -> t
 
-let rec is_nullable ?(no_lazy=false) = function
+let rec is_nullable = function
 	| TMono r ->
 		(match !r with None -> false | Some t -> is_nullable t)
 	| TType ({ t_path = ([],"Null") },[_]) ->
 		true
 	| TLazy f ->
-		if no_lazy then raise Exit else is_nullable (!f())
+		is_nullable (!f())
 	| TType (t,tl) ->
-		is_nullable (apply_params t.t_types tl t.t_type)
+		is_nullable (apply_params t.t_params tl t.t_type)
 	| TFun _ ->
 		false
 (*
@@ -570,19 +598,32 @@ let rec is_nullable ?(no_lazy=false) = function
 	| TAbstract (a,_) when Meta.has Meta.CoreType a.a_meta ->
 		not (Meta.has Meta.NotNull a.a_meta)
 	| TAbstract (a,tl) ->
-		is_nullable (apply_params a.a_types tl a.a_this)
+		is_nullable (apply_params a.a_params tl a.a_this)
 	| _ ->
 		true
 
-let rec is_null = function
+let rec is_null ?(no_lazy=false) = function
 	| TMono r ->
 		(match !r with None -> false | Some t -> is_null t)
 	| TType ({ t_path = ([],"Null") },[t]) ->
 		not (is_nullable (follow t))
 	| TLazy f ->
+		if no_lazy then raise Exit else is_null (!f())
+	| TType (t,tl) ->
+		is_null (apply_params t.t_params tl t.t_type)
+	| _ ->
+		false
+
+(* Determines if we have a Null<T>. Unlike is_null, this returns true even if the wrapped type is nullable itself. *)
+let rec is_explicit_null = function
+	| TMono r ->
+		(match !r with None -> false | Some t -> is_null t)
+	| TType ({ t_path = ([],"Null") },[t]) ->
+		true
+	| TLazy f ->
 		is_null (!f())
 	| TType (t,tl) ->
-		is_null (apply_params t.t_types tl t.t_type)
+		is_null (apply_params t.t_params tl t.t_type)
 	| _ ->
 		false
 
@@ -609,16 +650,18 @@ let concat e1 e2 =
 	) in
 	mk e e2.etype (punion e1.epos e2.epos)
 
+let is_closed a = !(a.a_status) <> Opened
+
 (* ======= Field utility ======= *)
 
 let field_name f =
 	match f with
-	| FAnon f | FInstance (_,f) | FStatic (_,f) | FClosure (_,f) -> f.cf_name
+	| FAnon f | FInstance (_,_,f) | FStatic (_,f) | FClosure (_,f) -> f.cf_name
 	| FEnum (_,f) -> f.ef_name
 	| FDynamic n -> n
 
 let extract_field = function
-	| FAnon f | FInstance (_,f) | FStatic (_,f) | FClosure (_,f) -> Some f
+	| FAnon f | FInstance (_,_,f) | FStatic (_,f) | FClosure (_,f) -> Some f
 	| _ -> None
 
 let is_extern_field f =
@@ -632,20 +675,21 @@ let field_type f =
 	| [] -> f.cf_type
 	| l -> monomorphs l f.cf_type
 
-let rec raw_class_field build_type c i =
+let rec raw_class_field build_type c tl i =
+	let apply = apply_params c.cl_params tl in
 	try
 		let f = PMap.find i c.cl_fields in
-		Some c, build_type f , f
+		Some (c,tl), build_type f , f
 	with Not_found -> try (match c.cl_constructor with
-		| Some ctor when i = "new" -> Some c, build_type ctor,ctor
+		| Some ctor when i = "new" -> Some (c,tl), build_type ctor,ctor
 		| _ -> raise Not_found)
 	with Not_found -> try
 		match c.cl_super with
 		| None ->
 			raise Not_found
 		| Some (c,tl) ->
-			let c2 , t , f = raw_class_field build_type c i in
-			c2, apply_params c.cl_types tl t , f
+			let c2 , t , f = raw_class_field build_type c (List.map apply tl) i in
+			c2, apply_params c.cl_params tl t , f
 	with Not_found ->
 		match c.cl_kind with
 		| KTypeParameter tl ->
@@ -660,10 +704,10 @@ let rec raw_class_field build_type c i =
 							None, build_type f, f
 						with
 							Not_found -> loop ctl)
-					| TInst (c,pl) ->
+					| TInst (c,tl) ->
 						(try
-							let c2, t , f = raw_class_field build_type c i in
-							c2, apply_params c.cl_types pl t, f
+							let c2, t , f = raw_class_field build_type c (List.map apply tl) i in
+							c2, apply_params c.cl_params tl t, f
 						with
 							Not_found -> loop ctl)
 					| _ ->
@@ -681,8 +725,8 @@ let rec raw_class_field build_type c i =
 					raise Not_found
 				| (c,tl) :: l ->
 					try
-						let c2, t , f = raw_class_field build_type c i in
-						c2, apply_params c.cl_types tl t, f
+						let c2, t , f = raw_class_field build_type c (List.map apply tl) i in
+						c2, apply_params c.cl_params tl t, f
 					with
 						Not_found -> loop l
 			in
@@ -692,9 +736,9 @@ let class_field = raw_class_field field_type
 
 let quick_field t n =
 	match follow t with
-	| TInst (c,_) ->
-		let c, _, f = raw_class_field (fun f -> f.cf_type) c n in
-		(match c with None -> FAnon f | Some c -> FInstance (c,f))
+	| TInst (c,tl) ->
+		let c, _, f = raw_class_field (fun f -> f.cf_type) c tl n in
+		(match c with None -> FAnon f | Some (c,tl) -> FInstance (c,tl,f))
 	| TAnon a ->
 		(match !(a.a_status) with
 		| EnumStatics e ->
@@ -729,7 +773,298 @@ let rec get_constructor build_type c =
 	| None, None -> raise Not_found
 	| None, Some (csup,cparams) ->
 		let t, c = get_constructor build_type csup in
-		apply_params csup.cl_types cparams t, c
+		apply_params csup.cl_params cparams t, c
+
+(* ======= Printing ======= *)
+
+let print_context() = ref []
+
+let rec s_type ctx t =
+	match t with
+	| TMono r ->
+		(match !r with
+		| None -> Printf.sprintf "Unknown<%d>" (try List.assq t (!ctx) with Not_found -> let n = List.length !ctx in ctx := (t,n) :: !ctx; n)
+		| Some t -> s_type ctx t)
+	| TEnum (e,tl) ->
+		Ast.s_type_path e.e_path ^ s_type_params ctx tl
+	| TInst (c,tl) ->
+		(match c.cl_kind with
+		| KExpr e -> Ast.s_expr e
+		| _ -> Ast.s_type_path c.cl_path ^ s_type_params ctx tl)
+	| TType (t,tl) ->
+		Ast.s_type_path t.t_path ^ s_type_params ctx tl
+	| TAbstract (a,tl) ->
+		Ast.s_type_path a.a_path ^ s_type_params ctx tl
+	| TFun ([],t) ->
+		"Void -> " ^ s_fun ctx t false
+	| TFun (l,t) ->
+		String.concat " -> " (List.map (fun (s,b,t) ->
+			(if b then "?" else "") ^ (if s = "" then "" else s ^ " : ") ^ s_fun ctx t true
+		) l) ^ " -> " ^ s_fun ctx t false
+	| TAnon a ->
+		let fl = PMap.fold (fun f acc -> ((if Meta.has Meta.Optional f.cf_meta then " ?" else " ") ^ f.cf_name ^ " : " ^ s_type ctx f.cf_type) :: acc) a.a_fields [] in
+		"{" ^ (if not (is_closed a) then "+" else "") ^  String.concat "," fl ^ " }"
+	| TDynamic t2 ->
+		"Dynamic" ^ s_type_params ctx (if t == t2 then [] else [t2])
+	| TLazy f ->
+		s_type ctx (!f())
+
+and s_fun ctx t void =
+	match t with
+	| TFun _ ->
+		"(" ^ s_type ctx t ^ ")"
+	| TAbstract ({ a_path = ([],"Void") },[]) when void ->
+		"(" ^ s_type ctx t ^ ")"
+	| TMono r ->
+		(match !r with
+		| None -> s_type ctx t
+		| Some t -> s_fun ctx t void)
+	| TLazy f ->
+		s_fun ctx (!f()) void
+	| _ ->
+		s_type ctx t
+
+and s_type_params ctx = function
+	| [] -> ""
+	| l -> "<" ^ String.concat ", " (List.map (s_type ctx) l) ^ ">"
+
+let s_access is_read = function
+	| AccNormal -> "default"
+	| AccNo -> "null"
+	| AccNever -> "never"
+	| AccResolve -> "resolve"
+	| AccCall -> if is_read then "get" else "set"
+	| AccInline	-> "inline"
+	| AccRequire (n,_) -> "require " ^ n
+
+let s_kind = function
+	| Var { v_read = AccNormal; v_write = AccNormal } -> "var"
+	| Var v -> "(" ^ s_access true v.v_read ^ "," ^ s_access false v.v_write ^ ")"
+	| Method m ->
+		match m with
+		| MethNormal -> "method"
+		| MethDynamic -> "dynamic method"
+		| MethInline -> "inline method"
+		| MethMacro -> "macro method"
+
+let s_expr_kind e =
+	match e.eexpr with
+	| TConst _ -> "Const"
+	| TLocal _ -> "Local"
+	| TArray (_,_) -> "Array"
+	| TBinop (_,_,_) -> "Binop"
+	| TEnumParameter (_,_,_) -> "EnumParameter"
+	| TField (_,_) -> "Field"
+	| TTypeExpr _ -> "TypeExpr"
+	| TParenthesis _ -> "Parenthesis"
+	| TObjectDecl _ -> "ObjectDecl"
+	| TArrayDecl _ -> "ArrayDecl"
+	| TCall (_,_) -> "Call"
+	| TNew (_,_,_) -> "New"
+	| TUnop (_,_,_) -> "Unop"
+	| TFunction _ -> "Function"
+	| TVar _ -> "Vars"
+	| TBlock _ -> "Block"
+	| TFor (_,_,_) -> "For"
+	| TIf (_,_,_) -> "If"
+	| TWhile (_,_,_) -> "While"
+	| TSwitch (_,_,_) -> "Switch"
+	| TTry (_,_) -> "Try"
+	| TReturn _ -> "Return"
+	| TBreak -> "Break"
+	| TContinue -> "Continue"
+	| TThrow _ -> "Throw"
+	| TCast _ -> "Cast"
+	| TMeta _ -> "Meta"
+
+let s_const = function
+	| TInt i -> Int32.to_string i
+	| TFloat s -> s
+	| TString s -> Printf.sprintf "\"%s\"" (Ast.s_escape s)
+	| TBool b -> if b then "true" else "false"
+	| TNull -> "null"
+	| TThis -> "this"
+	| TSuper -> "super"
+
+let rec s_expr s_type e =
+	let sprintf = Printf.sprintf in
+	let slist f l = String.concat "," (List.map f l) in
+	let loop = s_expr s_type in
+	let s_var v = v.v_name ^ ":" ^ string_of_int v.v_id ^ if v.v_capture then "[c]" else "" in
+	let str = (match e.eexpr with
+	| TConst c ->
+		"Const " ^ s_const c
+	| TLocal v ->
+		"Local " ^ s_var v
+	| TArray (e1,e2) ->
+		sprintf "%s[%s]" (loop e1) (loop e2)
+	| TBinop (op,e1,e2) ->
+		sprintf "(%s %s %s)" (loop e1) (s_binop op) (loop e2)
+	| TEnumParameter (e1,_,i) ->
+		sprintf "%s[%i]" (loop e1) i
+	| TField (e,f) ->
+		let fstr = (match f with
+			| FStatic (c,f) -> "static(" ^ s_type_path c.cl_path ^ "." ^ f.cf_name ^ ")"
+			| FInstance (c,_,f) -> "inst(" ^ s_type_path c.cl_path ^ "." ^ f.cf_name ^ " : " ^ s_type f.cf_type ^ ")"
+			| FClosure (c,f) -> "closure(" ^ (match c with None -> f.cf_name | Some c -> s_type_path c.cl_path ^ "." ^ f.cf_name)  ^ ")"
+			| FAnon f -> "anon(" ^ f.cf_name ^ ")"
+			| FEnum (en,f) -> "enum(" ^ s_type_path en.e_path ^ "." ^ f.ef_name ^ ")"
+			| FDynamic f -> "dynamic(" ^ f ^ ")"
+		) in
+		sprintf "%s.%s" (loop e) fstr
+	| TTypeExpr m ->
+		sprintf "TypeExpr %s" (s_type_path (t_path m))
+	| TParenthesis e ->
+		sprintf "Parenthesis %s" (loop e)
+	| TObjectDecl fl ->
+		sprintf "ObjectDecl {%s)" (slist (fun (f,e) -> sprintf "%s : %s" f (loop e)) fl)
+	| TArrayDecl el ->
+		sprintf "ArrayDecl [%s]" (slist loop el)
+	| TCall (e,el) ->
+		sprintf "Call %s(%s)" (loop e) (slist loop el)
+	| TNew (c,pl,el) ->
+		sprintf "New %s%s(%s)" (s_type_path c.cl_path) (match pl with [] -> "" | l -> sprintf "<%s>" (slist s_type l)) (slist loop el)
+	| TUnop (op,f,e) ->
+		(match f with
+		| Prefix -> sprintf "(%s %s)" (s_unop op) (loop e)
+		| Postfix -> sprintf "(%s %s)" (loop e) (s_unop op))
+	| TFunction f ->
+		let args = slist (fun (v,o) -> sprintf "%s : %s%s" (s_var v) (s_type v.v_type) (match o with None -> "" | Some c -> " = " ^ s_const c)) f.tf_args in
+		sprintf "Function(%s) : %s = %s" args (s_type f.tf_type) (loop f.tf_expr)
+	| TVar (v,eo) ->
+		sprintf "Vars %s" (sprintf "%s : %s%s" (s_var v) (s_type v.v_type) (match eo with None -> "" | Some e -> " = " ^ loop e))
+	| TBlock el ->
+		sprintf "Block {\n%s}" (String.concat "" (List.map (fun e -> sprintf "%s;\n" (loop e)) el))
+	| TFor (v,econd,e) ->
+		sprintf "For (%s : %s in %s,%s)" (s_var v) (s_type v.v_type) (loop econd) (loop e)
+	| TIf (e,e1,e2) ->
+		sprintf "If (%s,%s%s)" (loop e) (loop e1) (match e2 with None -> "" | Some e -> "," ^ loop e)
+	| TWhile (econd,e,flag) ->
+		(match flag with
+		| NormalWhile -> sprintf "While (%s,%s)" (loop econd) (loop e)
+		| DoWhile -> sprintf "DoWhile (%s,%s)" (loop e) (loop econd))
+	| TSwitch (e,cases,def) ->
+		sprintf "Switch (%s,(%s)%s)" (loop e) (slist (fun (cl,e) -> sprintf "case %s: %s" (slist loop cl) (loop e)) cases) (match def with None -> "" | Some e -> "," ^ loop e)
+	| TTry (e,cl) ->
+		sprintf "Try %s(%s) " (loop e) (slist (fun (v,e) -> sprintf "catch( %s : %s ) %s" (s_var v) (s_type v.v_type) (loop e)) cl)
+	| TReturn None ->
+		"Return"
+	| TReturn (Some e) ->
+		sprintf "Return %s" (loop e)
+	| TBreak ->
+		"Break"
+	| TContinue ->
+		"Continue"
+	| TThrow e ->
+		"Throw " ^ (loop e)
+	| TCast (e,t) ->
+		sprintf "Cast %s%s" (match t with None -> "" | Some t -> s_type_path (t_path t) ^ ": ") (loop e)
+	| TMeta ((n,el,_),e) ->
+		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.s_expr el)) ^ ")") (loop e)
+	) in
+	sprintf "(%s : %s)" str (s_type e.etype)
+
+and s_dt tabs tree =
+	let s_type = s_type (print_context()) in
+	tabs ^ match tree with
+	| DTSwitch (st,cl,dto) ->
+		"switch(" ^ (s_expr s_type st) ^ ") { \n" ^ tabs
+		^ (String.concat ("\n" ^ tabs) (List.map (fun (c,dt) ->
+			"case " ^ (s_expr s_type c) ^ ":\n" ^ (s_dt (tabs ^ "\t") dt)
+		) cl))
+		^ (match dto with None -> "" | Some dt -> tabs ^ "default: " ^ (s_dt (tabs ^ "\t") dt))
+		^ "\n" ^ (if String.length tabs = 0 then "" else (String.sub tabs 0 (String.length tabs - 1))) ^ "}"
+	| DTBind (bl, dt) -> "bind " ^ (String.concat "," (List.map (fun ((v,_),st) -> v.v_name ^ "(" ^ (string_of_int v.v_id) ^ ") =" ^ (s_expr s_type st)) bl)) ^ "\n" ^ (s_dt tabs dt)
+	| DTGoto i ->
+		"goto " ^ (string_of_int i)
+	| DTExpr e -> s_expr s_type e
+	| DTGuard (e,dt1,dt2) -> "if(" ^ (s_expr s_type e) ^ ") " ^ (s_dt tabs dt1) ^ (match dt2 with None -> "" | Some dt -> " else " ^ (s_dt tabs dt))
+
+let rec s_expr_pretty tabs s_type e =
+	let sprintf = Printf.sprintf in
+	let loop = s_expr_pretty tabs s_type in
+	let slist f l = String.concat "," (List.map f l) in
+	match e.eexpr with
+	| TConst c -> s_const c
+	| TLocal v -> v.v_name
+	| TArray (e1,e2) -> sprintf "%s[%s]" (loop e1) (loop e2)
+	| TBinop (op,e1,e2) -> sprintf "%s %s %s" (loop e1) (s_binop op) (loop e2)
+	| TEnumParameter (e1,_,i) -> sprintf "%s[%i]" (loop e1) i
+	| TField (e1,s) -> sprintf "%s.%s" (loop e1) (field_name s)
+	| TTypeExpr mt -> (s_type_path (t_path mt))
+	| TParenthesis e1 -> sprintf "(%s)" (loop e1)
+	| TObjectDecl fl -> sprintf "{%s}" (slist (fun (f,e) -> sprintf "%s : %s" f (loop e)) fl)
+	| TArrayDecl el -> sprintf "[%s]" (slist loop el)
+	| TCall (e1,el) -> sprintf "%s(%s)" (loop e1) (slist loop el)
+	| TNew (c,pl,el) ->
+		sprintf "new %s(%s)" (s_type_path c.cl_path) (slist loop el)
+	| TUnop (op,f,e) ->
+		(match f with
+		| Prefix -> sprintf "%s %s" (s_unop op) (loop e)
+		| Postfix -> sprintf "%s %s" (loop e) (s_unop op))
+	| TFunction f ->
+		let args = slist (fun (v,o) -> sprintf "%s:%s%s" v.v_name (s_type v.v_type) (match o with None -> "" | Some c -> " = " ^ s_const c)) f.tf_args in
+		sprintf "function(%s) = %s" args (loop f.tf_expr)
+	| TVar (v,eo) ->
+		sprintf "var %s" (sprintf "%s%s" v.v_name (match eo with None -> "" | Some e -> " = " ^ loop e))
+	| TBlock el ->
+		let ntabs = tabs ^ "\t" in
+		let s = sprintf "{\n%s" (String.concat "" (List.map (fun e -> sprintf "%s%s;\n" ntabs (s_expr_pretty ntabs s_type e)) el)) in
+		s ^ tabs ^ "}"
+	| TFor (v,econd,e) ->
+		sprintf "for (%s in %s) %s" v.v_name (loop econd) (loop e)
+	| TIf (e,e1,e2) ->
+		sprintf "if (%s)%s%s" (loop e) (loop e1) (match e2 with None -> "" | Some e -> " else " ^ loop e)
+	| TWhile (econd,e,flag) ->
+		(match flag with
+		| NormalWhile -> sprintf "while (%s) %s" (loop econd) (loop e)
+		| DoWhile -> sprintf "do (%s) while(%s)" (loop e) (loop econd))
+	| TSwitch (e,cases,def) ->
+		let ntabs = tabs ^ "\t" in
+		let s = sprintf "switch (%s) {\n%s%s" (loop e) (slist (fun (cl,e) -> sprintf "%scase %s: %s\n" ntabs (slist loop cl) (s_expr_pretty ntabs s_type e)) cases) (match def with None -> "" | Some e -> ntabs ^ "default: " ^ (s_expr_pretty ntabs s_type e) ^ "\n") in
+		s ^ tabs ^ "}"
+	| TTry (e,cl) ->
+		sprintf "try %s%s" (loop e) (slist (fun (v,e) -> sprintf "catch( %s : %s ) %s" v.v_name (s_type v.v_type) (loop e)) cl)
+	| TReturn None ->
+		"return"
+	| TReturn (Some e) ->
+		sprintf "return %s" (loop e)
+	| TBreak ->
+		"break"
+	| TContinue ->
+		"continue"
+	| TThrow e ->
+		"throw " ^ (loop e)
+	| TCast (e,None) ->
+		sprintf "cast %s" (loop e)
+	| TCast (e,Some mt) ->
+		sprintf "cast (%s,%s)" (loop e) (s_type_path (t_path mt))
+	| TMeta ((n,el,_),e) ->
+		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.s_expr el)) ^ ")") (loop e)
+
+let s_types ?(sep = ", ") tl =
+	let pctx = print_context() in
+	String.concat sep (List.map (s_type pctx) tl)
+
+let s_class_kind = function
+	| KNormal ->
+		"KNormal"
+	| KTypeParameter tl ->
+		Printf.sprintf "KTypeParameter [%s]" (s_types tl)
+	| KExtension(c,tl) ->
+		Printf.sprintf "KExtension %s<%s>" (s_type_path c.cl_path) (s_types tl)
+	| KExpr _ ->
+		"KExpr"
+	| KGeneric ->
+		"KGeneric"
+	| KGenericInstance(c,tl) ->
+		Printf.sprintf "KGenericInstance %s<%s>" (s_type_path c.cl_path) (s_types tl)
+	| KMacroType ->
+		"KMacroType"
+	| KGenericBuild _ ->
+		"KGenericBuild"
+	| KAbstractImpl a ->
+		Printf.sprintf "KAbstractImpl %s" (s_type_path a.a_path)
 
 (* ======= Unification ======= *)
 
@@ -860,8 +1195,6 @@ type eq_kind =
 	| EqRightDynamic
 	| EqBothDynamic
 
-let is_closed a = !(a.a_status) <> Opened
-
 let rec type_eq param a b =
 	if a == b then
 		()
@@ -879,14 +1212,14 @@ let rec type_eq param a b =
 	| TType (t1,tl1), TType (t2,tl2) when (t1 == t2 || (param = EqCoreType && t1.t_path = t2.t_path)) && List.length tl1 = List.length tl2 ->
 		List.iter2 (type_eq param) tl1 tl2
 	| TType (t,tl) , _ when param <> EqCoreType ->
-		type_eq param (apply_params t.t_types tl t.t_type) b
+		type_eq param (apply_params t.t_params tl t.t_type) b
 	| _ , TType (t,tl) when param <> EqCoreType ->
 		if List.exists (fun (a2,b2) -> fast_eq a a2 && fast_eq b b2) (!eq_stack) then
 			()
 		else begin
 			eq_stack := (a,b) :: !eq_stack;
 			try
-				type_eq param a (apply_params t.t_types tl t.t_type);
+				type_eq param a (apply_params t.t_params tl t.t_type);
 				eq_stack := List.tl !eq_stack;
 			with
 				Unify_error l ->
@@ -974,7 +1307,7 @@ let rec unify a b =
 		if not (List.exists (fun (a2,b2) -> fast_eq a a2 && fast_eq b b2) (!unify_stack)) then begin
 			try
 				unify_stack := (a,b) :: !unify_stack;
-				unify (apply_params t.t_types tl t.t_type) b;
+				unify (apply_params t.t_params tl t.t_type) b;
 				unify_stack := List.tl !unify_stack;
 			with
 				Unify_error l ->
@@ -985,7 +1318,7 @@ let rec unify a b =
 		if not (List.exists (fun (a2,b2) -> fast_eq a a2 && fast_eq b b2) (!unify_stack)) then begin
 			try
 				unify_stack := (a,b) :: !unify_stack;
-				unify a (apply_params t.t_types tl t.t_type);
+				unify a (apply_params t.t_params tl t.t_type);
 				unify_stack := List.tl !unify_stack;
 			with
 				Unify_error l ->
@@ -994,31 +1327,37 @@ let rec unify a b =
 		end
 	| TEnum (ea,tl1) , TEnum (eb,tl2) ->
 		if ea != eb then error [cannot_unify a b];
-		unify_types a b tl1 tl2
+		unify_type_params a b tl1 tl2
 	| TAbstract (a1,tl1) , TAbstract (a2,tl2) when a1 == a2 ->
-		unify_types a b tl1 tl2
+		begin try
+			unify_type_params a b tl1 tl2
+		with Unify_error _ as err ->
+			(* the type could still have a from/to relation to itself (issue #3494) *)
+			begin try
+				unify_abstracts a b a1 tl1 a2 tl2
+			with Unify_error _ ->
+				raise err
+			end
+		end
 	| TAbstract ({a_path=[],"Void"},_) , _
 	| _ , TAbstract ({a_path=[],"Void"},_) ->
 		error [cannot_unify a b]
 	| TAbstract (a1,tl1) , TAbstract (a2,tl2) ->
-		let f1 = unify_to_field a1 tl1 b in
-		let f2 = unify_from_field a2 tl2 a b in
-		if not (List.exists (f1 ~allow_transitive_cast:false) a1.a_to) && not (List.exists (f2 ~allow_transitive_cast:false) a2.a_from)
-		    && not (List.exists f1 a1.a_to) && not (List.exists f2 a2.a_from) then error [cannot_unify a b]
+		unify_abstracts a b a1 tl1 a2 tl2
 	| TInst (c1,tl1) , TInst (c2,tl2) ->
 		let rec loop c tl =
 			if c == c2 then begin
-				unify_types a b tl tl2;
+				unify_type_params a b tl tl2;
 				true
 			end else (match c.cl_super with
 				| None -> false
 				| Some (cs,tls) ->
-					loop cs (List.map (apply_params c.cl_types tl) tls)
+					loop cs (List.map (apply_params c.cl_params tl) tls)
 			) || List.exists (fun (cs,tls) ->
-				loop cs (List.map (apply_params c.cl_types tl) tls)
+				loop cs (List.map (apply_params c.cl_params tl) tls)
 			) c.cl_implements
 			|| (match c.cl_kind with
-			| KTypeParameter pl -> List.exists (fun t -> match follow t with TInst (cs,tls) -> loop cs (List.map (apply_params c.cl_types tl) tls) | _ -> false) pl
+			| KTypeParameter pl -> List.exists (fun t -> match follow t with TInst (cs,tls) -> loop cs (List.map (apply_params c.cl_params tl) tls) | _ -> false) pl
 			| _ -> false)
 		in
 		if not (loop c1 tl1) then error [cannot_unify a b]
@@ -1041,15 +1380,15 @@ let rec unify a b =
 		if PMap.is_empty an.a_fields then (match c.cl_kind with
 			| KTypeParameter pl ->
 				(* one of the constraints must unify with { } *)
-				if not (List.exists (fun t -> match t with TInst _ | TAnon _ -> true | _ -> false) pl) then error [cannot_unify a b]
+				if not (List.exists (fun t -> match follow t with TInst _ | TAnon _ -> true | _ -> false) pl) then error [cannot_unify a b]
 			| _ -> ());
 		(try
 			PMap.iter (fun n f2 ->
-				let _, ft, f1 = (try class_field c n with Not_found -> error [has_no_field a n]) in
+				let _, ft, f1 = (try class_field c tl n with Not_found -> error [has_no_field a n]) in
 				if not (unify_kind f1.cf_kind f2.cf_kind) then error [invalid_kind n f1.cf_kind f2.cf_kind];
 				if f2.cf_public && not f1.cf_public then error [invalid_visibility n];
 				(try
-					unify_with_access (apply_params c.cl_types tl ft) f2
+					unify_with_access (apply_params c.cl_params tl ft) f2
 				with
 					Unify_error l -> error (invalid_field n :: l));
 				List.iter (fun f2o ->
@@ -1066,59 +1405,18 @@ let rec unify a b =
 			(match !(an.a_status) with
 			| Opened -> an.a_status := Closed;
 			| Statics _ | EnumStatics _ | AbstractStatics _ -> error []
-			| Closed | Const -> ())
+			| Closed | Extend _ | Const -> ())
 		with
 			Unify_error l -> error (cannot_unify a b :: l))
 	| TAnon a1, TAnon a2 ->
-		(try
-			PMap.iter (fun n f2 ->
-			try
-				let f1 = PMap.find n a1.a_fields in
-				if not (unify_kind f1.cf_kind f2.cf_kind) then
-					(match !(a1.a_status), f1.cf_kind, f2.cf_kind with
-					| Opened, Var { v_read = AccNormal; v_write = AccNo }, Var { v_read = AccNormal; v_write = AccNormal } ->
-						f1.cf_kind <- f2.cf_kind;
-					| _ -> error [invalid_kind n f1.cf_kind f2.cf_kind]);
-				if f2.cf_public && not f1.cf_public then error [invalid_visibility n];
-				try
-					unify_with_access f1.cf_type f2;
-					(match !(a1.a_status) with
-					| Statics c when not (Meta.has Meta.MaybeUsed f1.cf_meta) -> f1.cf_meta <- (Meta.MaybeUsed,[],f1.cf_pos) :: f1.cf_meta
-					| _ -> ());
-				with
-					Unify_error l -> error (invalid_field n :: l)
-			with
-				Not_found ->
-					match !(a1.a_status) with
-					| Opened ->
-						if not (link (ref None) a f2.cf_type) then error [];
-						a1.a_fields <- PMap.add n f2 a1.a_fields
-					| Const when Meta.has Meta.Optional f2.cf_meta ->
-						()
-					| _ ->
-						error [has_no_field a n];
-			) a2.a_fields;
-			(match !(a1.a_status) with
-			| Const when not (PMap.is_empty a2.a_fields) ->
-				PMap.iter (fun n _ -> if not (PMap.mem n a2.a_fields) then error [has_extra_field a n]) a1.a_fields;
-			| Opened ->
-				a1.a_status := Closed
-			| _ -> ());
-			(match !(a2.a_status) with
-			| Statics c -> (match !(a1.a_status) with Statics c2 when c == c2 -> () | _ -> error [])
-			| EnumStatics e -> (match !(a1.a_status) with EnumStatics e2 when e == e2 -> () | _ -> error [])
-			| AbstractStatics a -> (match !(a1.a_status) with AbstractStatics a2 when a == a2 -> () | _ -> error [])
-			| Opened -> a2.a_status := Closed
-			| Const | Closed -> ())
-		with
-			Unify_error l -> error (cannot_unify a b :: l))
+		unify_anons a b a1 a2
 	| TAnon an, TAbstract ({ a_path = [],"Class" },[pt]) ->
 		(match !(an.a_status) with
-		| Statics cl -> unify (TInst (cl,List.map (fun _ -> mk_mono()) cl.cl_types)) pt
+		| Statics cl -> unify (TInst (cl,List.map (fun _ -> mk_mono()) cl.cl_params)) pt
 		| _ -> error [cannot_unify a b])
 	| TAnon an, TAbstract ({ a_path = [],"Enum" },[pt]) ->
 		(match !(an.a_status) with
-		| EnumStatics e -> unify (TEnum (e,List.map (fun _ -> mk_mono()) e.e_types)) pt
+		| EnumStatics e -> unify (TEnum (e,List.map (fun _ -> mk_mono()) e.e_params)) pt
 		| _ -> error [cannot_unify a b])
 	| TEnum _, TAbstract ({ a_path = [],"EnumValue" },[]) ->
 		()
@@ -1136,6 +1434,8 @@ let rec unify a b =
 					type_eq EqRightDynamic t t2
 				with
 					Unify_error l -> error (cannot_unify a b :: l));
+		| TAbstract(bb,tl) when (List.exists (unify_from bb tl a b) bb.a_from) ->
+			()
 		| _ ->
 			error [cannot_unify a b])
 	| _ , TDynamic t ->
@@ -1162,40 +1462,119 @@ let rec unify a b =
 				) an.a_fields
 			with Unify_error l ->
 				error (cannot_unify a b :: l))
+		| TAbstract(aa,tl) when (List.exists (unify_to aa tl b) aa.a_to) ->
+			()
 		| _ ->
 			error [cannot_unify a b])
 	| TAbstract (aa,tl), _  ->
-		if not (List.exists (unify_to_field aa tl b) aa.a_to) then error [cannot_unify a b];
+		if not (List.exists (unify_to aa tl b) aa.a_to) then error [cannot_unify a b];
 	| TInst ({ cl_kind = KTypeParameter ctl } as c,pl), TAbstract (bb,tl) ->
 		(* one of the constraints must satisfy the abstract *)
 		if not (List.exists (fun t ->
-			let t = apply_params c.cl_types pl t in
+			let t = apply_params c.cl_params pl t in
 			try unify t b; true with Unify_error _ -> false
-		) ctl) && not (List.exists (unify_from_field bb tl a b) bb.a_from) then error [cannot_unify a b];
+		) ctl) && not (List.exists (unify_from bb tl a b) bb.a_from) then error [cannot_unify a b];
 	| _, TAbstract (bb,tl) ->
-		if not (List.exists (unify_from_field bb tl a b) bb.a_from) then error [cannot_unify a b]
+		if not (List.exists (unify_from bb tl a b) bb.a_from) then error [cannot_unify a b]
 	| _ , _ ->
 		error [cannot_unify a b]
 
-and unify_from_field ab tl a b ?(allow_transitive_cast=true) (t,cfo) =
+and unify_abstracts a b a1 tl1 a2 tl2 =
+	let f1 = unify_to a1 tl1 b in
+		let f2 = unify_from a2 tl2 a b in
+		if (List.exists (f1 ~allow_transitive_cast:false) a1.a_to)
+		|| (List.exists (f2 ~allow_transitive_cast:false) a2.a_from)
+		|| (((Meta.has Meta.CoreType a1.a_meta) || (Meta.has Meta.CoreType a2.a_meta))
+			&& ((List.exists f1 a1.a_to) || (List.exists f2 a2.a_from))) then
+			()
+		else
+			error [cannot_unify a b]
+
+and unify_anons a b a1 a2 =
+	(try
+		PMap.iter (fun n f2 ->
+		try
+			let f1 = PMap.find n a1.a_fields in
+			if not (unify_kind f1.cf_kind f2.cf_kind) then
+				(match !(a1.a_status), f1.cf_kind, f2.cf_kind with
+				| Opened, Var { v_read = AccNormal; v_write = AccNo }, Var { v_read = AccNormal; v_write = AccNormal } ->
+					f1.cf_kind <- f2.cf_kind;
+				| _ -> error [invalid_kind n f1.cf_kind f2.cf_kind]);
+			if f2.cf_public && not f1.cf_public then error [invalid_visibility n];
+			try
+				unify_with_access f1.cf_type f2;
+				(match !(a1.a_status) with
+				| Statics c when not (Meta.has Meta.MaybeUsed f1.cf_meta) -> f1.cf_meta <- (Meta.MaybeUsed,[],f1.cf_pos) :: f1.cf_meta
+				| _ -> ());
+			with
+				Unify_error l -> error (invalid_field n :: l)
+		with
+			Not_found ->
+				match !(a1.a_status) with
+				| Opened ->
+					if not (link (ref None) a f2.cf_type) then error [];
+					a1.a_fields <- PMap.add n f2 a1.a_fields
+				| Const when Meta.has Meta.Optional f2.cf_meta ->
+					()
+				| _ ->
+					error [has_no_field a n];
+		) a2.a_fields;
+		(match !(a1.a_status) with
+		| Const when not (PMap.is_empty a2.a_fields) ->
+			PMap.iter (fun n _ -> if not (PMap.mem n a2.a_fields) then error [has_extra_field a n]) a1.a_fields;
+		| Opened ->
+			a1.a_status := Closed
+		| _ -> ());
+		(match !(a2.a_status) with
+		| Statics c -> (match !(a1.a_status) with Statics c2 when c == c2 -> () | _ -> error [])
+		| EnumStatics e -> (match !(a1.a_status) with EnumStatics e2 when e == e2 -> () | _ -> error [])
+		| AbstractStatics a -> (match !(a1.a_status) with AbstractStatics a2 when a == a2 -> () | _ -> error [])
+		| Opened -> a2.a_status := Closed
+		| Const | Extend _ | Closed -> ())
+	with
+		Unify_error l -> error (cannot_unify a b :: l))
+
+and unify_from ab tl a b ?(allow_transitive_cast=true) t =
 	if (List.exists (fun (a2,b2) -> fast_eq a a2 && fast_eq b b2) (!abstract_cast_stack)) then false else begin
 	abstract_cast_stack := (a,b) :: !abstract_cast_stack;
-	let unify_func = match follow a with TAbstract({a_impl = Some _},_) when ab.a_impl <> None || not allow_transitive_cast -> type_eq EqStrict | _ -> unify in
-	let b = try begin match cfo with
-		| Some cf -> (match follow cf.cf_type with
+	let t = apply_params ab.a_params tl t in
+	let unify_func = if allow_transitive_cast then unify else type_eq EqStrict in
+	let b = try
+		unify_func a t;
+		true
+	with Unify_error _ ->
+		false
+	in
+	abstract_cast_stack := List.tl !abstract_cast_stack;
+	b
+	end
+
+and unify_to ab tl b ?(allow_transitive_cast=true) t =
+	let t = apply_params ab.a_params tl t in
+	let unify_func = if allow_transitive_cast then unify else type_eq EqStrict in
+	try
+		unify_func t b;
+		true
+	with Unify_error _ ->
+		false
+
+and unify_from_field ab tl a b ?(allow_transitive_cast=true) (t,cf) =
+	if (List.exists (fun (a2,b2) -> fast_eq a a2 && fast_eq b b2) (!abstract_cast_stack)) then false else begin
+	abstract_cast_stack := (a,b) :: !abstract_cast_stack;
+	let unify_func = if allow_transitive_cast then unify else type_eq EqStrict in
+	let b = try
+		begin match follow cf.cf_type with
 			| TFun(_,r) ->
 				let monos = List.map (fun _ -> mk_mono()) cf.cf_params in
-				let map t = apply_params ab.a_types tl (apply_params cf.cf_params monos t) in
+				let map t = apply_params ab.a_params tl (apply_params cf.cf_params monos t) in
 				unify_func a (map t);
 				List.iter2 (fun m (name,t) -> match follow t with
 					| TInst ({ cl_kind = KTypeParameter constr },_) when constr <> [] ->
 						List.iter (fun tc -> match follow m with TMono _ -> raise (Unify_error []) | _ -> unify m (map tc) ) constr
 					| _ -> ()
 				) monos cf.cf_params;
-				unify (map r) b;
-			| _ -> assert false)
-		| _ ->
-			unify_func a (apply_params ab.a_types tl t)
+				unify_func (map r) b;
+			| _ -> assert false
 		end;
 		true
 	with Unify_error _ -> false
@@ -1204,24 +1583,19 @@ and unify_from_field ab tl a b ?(allow_transitive_cast=true) (t,cfo) =
 	b
 	end
 
-and unify_to_field ab tl b ?(allow_transitive_cast=true) (t,cfo) =
+and unify_to_field ab tl b ?(allow_transitive_cast=true) (t,cf) =
 	let a = TAbstract(ab,tl) in
 	if (List.exists (fun (b2,a2) -> fast_eq a a2 && fast_eq b b2) (!abstract_cast_stack)) then false else begin
 	abstract_cast_stack := (b,a) :: !abstract_cast_stack;
-	let unify_func = match follow b with
-		| TAbstract(ab2,_) when not (Meta.has Meta.CoreType ab.a_meta) || not (Meta.has Meta.CoreType ab2.a_meta) || not allow_transitive_cast ->
-			type_eq EqStrict
-		| _ ->
-			unify
-	in
-	let r = try begin match cfo with
-		| Some cf -> (match follow cf.cf_type with
+	let unify_func = if allow_transitive_cast then unify else type_eq EqStrict in
+	let r = try
+		begin match follow cf.cf_type with
 			| TFun((_,_,ta) :: _,_) ->
 				let monos = List.map (fun _ -> mk_mono()) cf.cf_params in
-				let map t = apply_params ab.a_types tl (apply_params cf.cf_params monos t) in
+				let map t = apply_params ab.a_params tl (apply_params cf.cf_params monos t) in
 				let athis = map ab.a_this in
 				(* we cannot allow implicit casts when the this type is not completely known yet *)
-				if has_mono athis then raise (Unify_error []);
+				(* if has_mono athis then raise (Unify_error []); *)
 				with_variance (type_eq EqStrict) athis (map ta);
 				(* immediate constraints checking is ok here because we know there are no monomorphs *)
 				List.iter2 (fun m (name,t) -> match follow t with
@@ -1230,9 +1604,7 @@ and unify_to_field ab tl b ?(allow_transitive_cast=true) (t,cfo) =
 					| _ -> ()
 				) monos cf.cf_params;
 				unify_func (map t) b;
-			| _ -> assert false)
-		| _ ->
-			unify_func (apply_params ab.a_types tl t) b;
+			| _ -> assert false
 		end;
 		true
 	with Unify_error _ -> false
@@ -1241,33 +1613,35 @@ and unify_to_field ab tl b ?(allow_transitive_cast=true) (t,cfo) =
 	r
 	end
 
-and unify_with_variance t1 t2 =
-	let allows_variance_to t (tf,cfo) = match cfo with
-		| None -> type_iseq tf t
-		| Some _ -> false
-	in
+and unify_with_variance f t1 t2 =
+	let allows_variance_to t tf = type_iseq tf t in
 	match follow t1,follow t2 with
 	| TInst(c1,tl1),TInst(c2,tl2) when c1 == c2 ->
-		List.iter2 unify_with_variance tl1 tl2
+		List.iter2 f tl1 tl2
 	| TEnum(en1,tl1),TEnum(en2,tl2) when en1 == en2 ->
-		List.iter2 unify_with_variance tl1 tl2
+		List.iter2 f tl1 tl2
+	| TAbstract(a1,tl1),TAbstract(a2,tl2) when a1 == a2 && Meta.has Meta.CoreType a1.a_meta ->
+		List.iter2 f tl1 tl2
 	| TAbstract(a1,pl1),TAbstract(a2,pl2) ->
-		let ta1 = apply_params a1.a_types pl1 a1.a_this in
-		let ta2 = apply_params a2.a_types pl2 a2.a_this in
-		if (Meta.has Meta.CoreType a1.a_meta) && (Meta.has Meta.CoreType a2.a_meta) then
+		if (Meta.has Meta.CoreType a1.a_meta) && (Meta.has Meta.CoreType a2.a_meta) then begin
+			let ta1 = apply_params a1.a_params pl1 a1.a_this in
+			let ta2 = apply_params a2.a_params pl2 a2.a_this in
 			type_eq EqStrict ta1 ta2;
-		if not (List.exists (allows_variance_to ta2) a1.a_to) && not (List.exists (allows_variance_to ta1) a2.a_from) then
+		end;
+		if not (List.exists (allows_variance_to t2) a1.a_to) && not (List.exists (allows_variance_to t1) a2.a_from) then
 			error [cannot_unify t1 t2]
 	| TAbstract(a,pl),t ->
-		type_eq EqStrict (apply_params a.a_types pl a.a_this) t;
-		if not (List.exists (allows_variance_to t) a.a_to) then error [cannot_unify t1 t2]
+		type_eq EqBothDynamic (apply_params a.a_params pl a.a_this) t;
+		if not (List.exists (fun t2 -> allows_variance_to t (apply_params a.a_params pl t2)) a.a_to) then error [cannot_unify t1 t2]
 	| t,TAbstract(a,pl) ->
-		type_eq EqStrict t (apply_params a.a_types pl a.a_this);
-		if not (List.exists (allows_variance_to t) a.a_from) then error [cannot_unify t1 t2]
+		type_eq EqBothDynamic t (apply_params a.a_params pl a.a_this);
+		if not (List.exists (fun t2 -> allows_variance_to t (apply_params a.a_params pl t2)) a.a_from) then error [cannot_unify t1 t2]
+	| TAnon a1,TAnon a2 ->
+		unify_anons t1 t2 a1 a2
 	| _ ->
 		error [cannot_unify t1 t2]
 
-and unify_types a b tl1 tl2 =
+and unify_type_params a b tl1 tl2 =
 	List.iter2 (fun t1 t2 ->
 		try
 			with_variance (type_eq EqRightDynamic) t1 t2
@@ -1280,7 +1654,7 @@ and with_variance f t1 t2 =
 	try
 		f t1 t2
 	with Unify_error l -> try
-		unify_with_variance t1 t2
+		unify_with_variance (with_variance f) t1 t2
 	with Unify_error _ ->
 		raise (Unify_error l)
 
@@ -1291,7 +1665,64 @@ and unify_with_access t1 f2 =
 	(* read only *)
 	| Method MethNormal | Method MethInline | Var { v_write = AccNo } | Var { v_write = AccNever } -> unify t1 f2.cf_type
 	(* read/write *)
-	| _ -> type_eq EqBothDynamic t1 f2.cf_type
+	| _ -> with_variance (type_eq EqBothDynamic) t1 f2.cf_type
+
+module Abstract = struct
+	open Ast
+
+	let find_to ab pl b =
+		if follow b == t_dynamic then
+			List.find (fun (t,_) -> follow t == t_dynamic) ab.a_to_field
+		else if List.exists (unify_to ab pl ~allow_transitive_cast:false b) ab.a_to then
+			raise Not_found (* legacy compatibility *)
+		else
+			List.find (unify_to_field ab pl b) ab.a_to_field
+
+	let find_from ab pl a b =
+		if follow a == t_dynamic then
+			List.find (fun (t,_) -> follow t == t_dynamic) ab.a_from_field
+		else if List.exists (unify_from ab pl a ~allow_transitive_cast:false b) ab.a_from then
+			raise Not_found (* legacy compatibility *)
+		else
+			List.find (unify_from_field ab pl a b) ab.a_from_field
+
+	let underlying_type_stack = ref []
+
+	let rec get_underlying_type a pl =
+		let maybe_recurse t =
+			underlying_type_stack := a :: !underlying_type_stack;
+			let t = match follow t with
+				| TAbstract(a,tl) when not (Meta.has Meta.CoreType a.a_meta) ->
+					if List.mem a !underlying_type_stack then begin
+						(* let s = String.concat " -> " (List.map (fun a -> s_type_path a.a_path) (List.rev (a :: !underlying_type_stack))) in *)
+						(* technically this should be done at type declaration level *)
+						(* error ("Abstract chain detected: " ^ s) a.a_pos *)
+						assert false
+					end;
+					get_underlying_type a tl
+				| _ ->
+					t
+			in
+			underlying_type_stack := List.tl !underlying_type_stack;
+			t
+		in
+		try
+			if not (Meta.has Meta.MultiType a.a_meta) then raise Not_found;
+			let m = mk_mono() in
+			let _ = find_to a pl m in
+			maybe_recurse (follow m)
+		with Not_found ->
+			if Meta.has Meta.CoreType a.a_meta then
+				t_dynamic
+			else
+				maybe_recurse (apply_params a.a_params pl a.a_this)
+
+	let rec follow_with_abstracts t = match follow t with
+		| TAbstract(a,tl) when not (Meta.has Meta.CoreType a.a_meta) ->
+			follow_with_abstracts (get_underlying_type a tl)
+		| t ->
+			t
+end
 
 (* ======= Mapping and iterating ======= *)
 
@@ -1348,25 +1779,6 @@ let iter f e =
 		f e;
 		List.iter (fun (el,e2) -> List.iter f el; f e2) cases;
 		(match def with None -> () | Some e -> f e)
-	| TPatMatch dt ->
-		let rec loop dt = match dt with
-			| DTBind(_,dt) -> loop dt
-			| DTGoto _ -> ()
-			| DTSwitch(e,cl,dto) ->
-				f e;
-				List.iter (fun (e,dt) ->
-					f e;
-					loop dt
-				) cl;
-				(match dto with None -> () | Some dt -> loop dt)
-			| DTExpr e -> f e
-			| DTGuard(eg,dt1,dt2) ->
-				f eg;
-				loop dt1;
-				(match dt2 with None -> () | Some dt -> loop dt)
-		in
-		List.iter (fun (_,eo) -> match eo with None -> () | Some e -> f e) dt.dt_var_init;
-		Array.iter loop dt.dt_dt_lookup
 	| TTry (e,catches) ->
 		f e;
 		List.iter (fun (_,e) -> f e) catches
@@ -1425,16 +1837,6 @@ let map_expr f e =
 		let e1 = f e1 in
 		let cases = List.map (fun (el,e2) -> List.map f el, f e2) cases in
 		{ e with eexpr = TSwitch (e1, cases, match def with None -> None | Some e -> Some (f e)) }
-	| TPatMatch dt ->
-		let rec loop dt = match dt with
-			| DTBind(vl,dt) -> DTBind(vl, loop dt)
-			| DTGoto _ -> dt
-			| DTSwitch(e,cl,dto) -> DTSwitch(f e, List.map (fun (e,dt) -> f e,loop dt) cl,match dto with None -> None | Some dt -> Some (loop dt))
-			| DTExpr e -> DTExpr(f e)
-			| DTGuard(e,dt1,dt2) -> DTGuard(f e,loop dt1,match dt2 with None -> None | Some dt -> Some (loop dt))
-		in
-		let vi = List.map (fun (v,eo) -> v, match eo with None -> None | Some e -> Some(f e)) dt.dt_var_init in
-		{ e with eexpr = TPatMatch({dt with dt_dt_lookup = Array.map loop dt.dt_dt_lookup; dt_var_init = vi})}
 	| TTry (e1,catches) ->
 		let e1 = f e1 in
 		{ e with eexpr = TTry (e1, List.map (fun (v,e) -> v, f e) catches) }
@@ -1476,7 +1878,7 @@ let map_expr_type f ft fv e =
 		let v = try
 			let n = match v with
 				| FClosure _ -> raise Not_found
-				| FAnon f | FInstance (_,f) | FStatic (_,f) -> f.cf_name
+				| FAnon f | FInstance (_,_,f) | FStatic (_,f) -> f.cf_name
 				| FEnum (_,f) -> f.ef_name
 				| FDynamic n -> n
 			in
@@ -1491,10 +1893,16 @@ let map_expr_type f ft fv e =
 		{ e with eexpr = TUnop (op,pre,f e1); etype = ft e.etype }
 	| TArrayDecl el ->
 		{ e with eexpr = TArrayDecl (List.map f el); etype = ft e.etype }
-	| TNew (_,_,el) ->
+	| TNew (c,pl,el) ->
 		let et = ft e.etype in
 		(* make sure that we use the class corresponding to the replaced type *)
-		let c, pl = (match follow et with TInst (c,pl) -> (c,pl) | TAbstract({a_impl = Some c},pl) -> c,pl | t -> error [has_no_field t "new"]) in
+		let t = match c.cl_kind with
+			| KTypeParameter _ | KGeneric ->
+				et
+			| _ ->
+				ft (TInst(c,pl))
+		in
+		let c, pl = (match follow t with TInst (c,pl) -> (c,pl) | TAbstract({a_impl = Some c},pl) -> c,pl | t -> error [has_no_field t "new"]) in
 		{ e with eexpr = TNew (c,pl,List.map f el); etype = et }
 	| TBlock el ->
 		{ e with eexpr = TBlock (List.map f el); etype = ft e.etype }
@@ -1520,16 +1928,6 @@ let map_expr_type f ft fv e =
 		let e1 = f e1 in
 		let cases = List.map (fun (el,e2) -> List.map f el, f e2) cases in
 		{ e with eexpr = TSwitch (e1, cases, match def with None -> None | Some e -> Some (f e)); etype = ft e.etype }
-	| TPatMatch dt ->
-		let rec loop dt = match dt with
-			| DTBind(vl,dt) -> DTBind(vl, loop dt)
-			| DTGoto _ -> dt
-			| DTSwitch(e,cl,dto) -> DTSwitch(f e, List.map (fun (e,dt) -> f e,loop dt) cl,match dto with None -> None | Some dt -> Some (loop dt))
-			| DTExpr e -> DTExpr(f e)
-			| DTGuard (e,dt1,dt2) -> DTGuard(f e, loop dt, match dt2 with None -> None | Some dt -> Some (loop dt))
-		in
-		let vi = List.map (fun (v,eo) -> v, match eo with None -> None | Some e -> Some(f e)) dt.dt_var_init in
-		{ e with eexpr = TPatMatch({dt with dt_dt_lookup = Array.map loop dt.dt_dt_lookup; dt_var_init = vi}); etype = ft e.etype}
 	| TTry (e1,catches) ->
 		let e1 = f e1 in
 		{ e with eexpr = TTry (e1, List.map (fun (v,e) -> fv v, f e) catches); etype = ft e.etype }
@@ -1539,302 +1937,3 @@ let map_expr_type f ft fv e =
 		{ e with eexpr = TCast (f e1,t); etype = ft e.etype }
 	| TMeta (m,e1) ->
 		{e with eexpr = TMeta(m, f e1); etype = ft e.etype }
-
-(* ======= Miscellaneous ======= *)
-
-let find_array_access a pl t1 t2 is_set =
-	let ta = apply_params a.a_types pl a.a_this in
-	let rec loop cfl = match cfl with
-		| [] -> raise Not_found
-		| cf :: cfl when not (Meta.has Meta.ArrayAccess cf.cf_meta) ->
-			loop cfl
-		| cf :: cfl ->
-			match follow (apply_params a.a_types pl (monomorphs cf.cf_params cf.cf_type)) with
-			| TFun([(_,_,tab);(_,_,ta1);(_,_,ta2)],r) as tf when is_set ->
-				begin try
-					unify tab ta;
-					unify t1 ta1;
-					unify t2 ta2;
-					cf,tf,r
-				with Unify_error _ ->
-					loop cfl
-				end
-			| TFun([(_,_,tab);(_,_,ta1)],r) as tf when not is_set ->
-				begin try
-					unify tab ta;
-					unify t1 ta1;
-					cf,tf,r
-				with Unify_error _ ->
-					loop cfl
-				end
-			| _ -> loop cfl
-	in
-	loop a.a_array
-
-(* ======= Printing ======= *)
-
-let print_context() = ref []
-
-let rec s_type ctx t =
-	match t with
-	| TMono r ->
-		(match !r with
-		| None -> Printf.sprintf "Unknown<%d>" (try List.assq t (!ctx) with Not_found -> let n = List.length !ctx in ctx := (t,n) :: !ctx; n)
-		| Some t -> s_type ctx t)
-	| TEnum (e,tl) ->
-		Ast.s_type_path e.e_path ^ s_type_params ctx tl
-	| TInst (c,tl) ->
-		Ast.s_type_path c.cl_path ^ s_type_params ctx tl
-	| TType (t,tl) ->
-		Ast.s_type_path t.t_path ^ s_type_params ctx tl
-	| TAbstract (a,tl) ->
-		Ast.s_type_path a.a_path ^ s_type_params ctx tl
-	| TFun ([],t) ->
-		"Void -> " ^ s_fun ctx t false
-	| TFun (l,t) ->
-		String.concat " -> " (List.map (fun (s,b,t) ->
-			(if b then "?" else "") ^ (if s = "" then "" else s ^ " : ") ^ s_fun ctx t true
-		) l) ^ " -> " ^ s_fun ctx t false
-	| TAnon a ->
-		let fl = PMap.fold (fun f acc -> ((if Meta.has Meta.Optional f.cf_meta then " ?" else " ") ^ f.cf_name ^ " : " ^ s_type ctx f.cf_type) :: acc) a.a_fields [] in
-		"{" ^ (if not (is_closed a) then "+" else "") ^  String.concat "," fl ^ " }"
-	| TDynamic t2 ->
-		"Dynamic" ^ s_type_params ctx (if t == t2 then [] else [t2])
-	| TLazy f ->
-		s_type ctx (!f())
-
-and s_fun ctx t void =
-	match t with
-	| TFun _ ->
-		"(" ^ s_type ctx t ^ ")"
-	| TAbstract ({ a_path = ([],"Void") },[]) when void ->
-		"(" ^ s_type ctx t ^ ")"
-	| TMono r ->
-		(match !r with
-		| None -> s_type ctx t
-		| Some t -> s_fun ctx t void)
-	| TLazy f ->
-		s_fun ctx (!f()) void
-	| _ ->
-		s_type ctx t
-
-and s_type_params ctx = function
-	| [] -> ""
-	| l -> "<" ^ String.concat ", " (List.map (s_type ctx) l) ^ ">"
-
-let s_access is_read = function
-	| AccNormal -> "default"
-	| AccNo -> "null"
-	| AccNever -> "never"
-	| AccResolve -> "resolve"
-	| AccCall -> if is_read then "get" else "set"
-	| AccInline	-> "inline"
-	| AccRequire (n,_) -> "require " ^ n
-
-let s_kind = function
-	| Var { v_read = AccNormal; v_write = AccNormal } -> "var"
-	| Var v -> "(" ^ s_access true v.v_read ^ "," ^ s_access false v.v_write ^ ")"
-	| Method m ->
-		match m with
-		| MethNormal -> "method"
-		| MethDynamic -> "dynamic method"
-		| MethInline -> "inline method"
-		| MethMacro -> "macro method"
-
-let s_expr_kind e =
-	match e.eexpr with
-	| TConst _ -> "Const"
-	| TLocal _ -> "Local"
-	| TArray (_,_) -> "Array"
-	| TBinop (_,_,_) -> "Binop"
-	| TEnumParameter (_,_,_) -> "EnumParameter"
-	| TField (_,_) -> "Field"
-	| TTypeExpr _ -> "TypeExpr"
-	| TParenthesis _ -> "Parenthesis"
-	| TObjectDecl _ -> "ObjectDecl"
-	| TArrayDecl _ -> "ArrayDecl"
-	| TCall (_,_) -> "Call"
-	| TNew (_,_,_) -> "New"
-	| TUnop (_,_,_) -> "Unop"
-	| TFunction _ -> "Function"
-	| TVar _ -> "Vars"
-	| TBlock _ -> "Block"
-	| TFor (_,_,_) -> "For"
-	| TIf (_,_,_) -> "If"
-	| TWhile (_,_,_) -> "While"
-	| TSwitch (_,_,_) -> "Switch"
-	| TPatMatch _ -> "PatMatch"
-	| TTry (_,_) -> "Try"
-	| TReturn _ -> "Return"
-	| TBreak -> "Break"
-	| TContinue -> "Continue"
-	| TThrow _ -> "Throw"
-	| TCast _ -> "Cast"
-	| TMeta _ -> "Meta"
-
-let s_const = function
-	| TInt i -> Int32.to_string i
-	| TFloat s -> s ^ "f"
-	| TString s -> Printf.sprintf "\"%s\"" (Ast.s_escape s)
-	| TBool b -> if b then "true" else "false"
-	| TNull -> "null"
-	| TThis -> "this"
-	| TSuper -> "super"
-
-let rec s_expr s_type e =
-	let sprintf = Printf.sprintf in
-	let slist f l = String.concat "," (List.map f l) in
-	let loop = s_expr s_type in
-	let s_var v = v.v_name ^ ":" ^ string_of_int v.v_id ^ if v.v_capture then "[c]" else "" in
-	let str = (match e.eexpr with
-	| TConst c ->
-		"Const " ^ s_const c
-	| TLocal v ->
-		"Local " ^ s_var v
-	| TArray (e1,e2) ->
-		sprintf "%s[%s]" (loop e1) (loop e2)
-	| TBinop (op,e1,e2) ->
-		sprintf "(%s %s %s)" (loop e1) (s_binop op) (loop e2)
-	| TEnumParameter (e1,_,i) ->
-		sprintf "%s[%i]" (loop e1) i
-	| TField (e,f) ->
-		let fstr = (match f with
-			| FStatic (c,f) -> "static(" ^ s_type_path c.cl_path ^ "." ^ f.cf_name ^ ")"
-			| FInstance (c,f) -> "inst(" ^ s_type_path c.cl_path ^ "." ^ f.cf_name ^ " : " ^ s_type f.cf_type ^ ")"
-			| FClosure (c,f) -> "closure(" ^ (match c with None -> f.cf_name | Some c -> s_type_path c.cl_path ^ "." ^ f.cf_name)  ^ ")"
-			| FAnon f -> "anon(" ^ f.cf_name ^ ")"
-			| FEnum (en,f) -> "enum(" ^ s_type_path en.e_path ^ "." ^ f.ef_name ^ ")"
-			| FDynamic f -> "dynamic(" ^ f ^ ")"
-		) in
-		sprintf "%s.%s" (loop e) fstr
-	| TTypeExpr m ->
-		sprintf "TypeExpr %s" (s_type_path (t_path m))
-	| TParenthesis e ->
-		sprintf "Parenthesis %s" (loop e)
-	| TObjectDecl fl ->
-		sprintf "ObjectDecl {%s)" (slist (fun (f,e) -> sprintf "%s : %s" f (loop e)) fl)
-	| TArrayDecl el ->
-		sprintf "ArrayDecl [%s]" (slist loop el)
-	| TCall (e,el) ->
-		sprintf "Call %s(%s)" (loop e) (slist loop el)
-	| TNew (c,pl,el) ->
-		sprintf "New %s%s(%s)" (s_type_path c.cl_path) (match pl with [] -> "" | l -> sprintf "<%s>" (slist s_type l)) (slist loop el)
-	| TUnop (op,f,e) ->
-		(match f with
-		| Prefix -> sprintf "(%s %s)" (s_unop op) (loop e)
-		| Postfix -> sprintf "(%s %s)" (loop e) (s_unop op))
-	| TFunction f ->
-		let args = slist (fun (v,o) -> sprintf "%s : %s%s" (s_var v) (s_type v.v_type) (match o with None -> "" | Some c -> " = " ^ s_const c)) f.tf_args in
-		sprintf "Function(%s) : %s = %s" args (s_type f.tf_type) (loop f.tf_expr)
-	| TVar (v,eo) ->
-		sprintf "Vars %s" (sprintf "%s : %s%s" (s_var v) (s_type v.v_type) (match eo with None -> "" | Some e -> " = " ^ loop e))
-	| TBlock el ->
-		sprintf "Block {\n%s}" (String.concat "" (List.map (fun e -> sprintf "%s;\n" (loop e)) el))
-	| TFor (v,econd,e) ->
-		sprintf "For (%s : %s in %s,%s)" (s_var v) (s_type v.v_type) (loop econd) (loop e)
-	| TIf (e,e1,e2) ->
-		sprintf "If (%s,%s%s)" (loop e) (loop e1) (match e2 with None -> "" | Some e -> "," ^ loop e)
-	| TWhile (econd,e,flag) ->
-		(match flag with
-		| NormalWhile -> sprintf "While (%s,%s)" (loop econd) (loop e)
-		| DoWhile -> sprintf "DoWhile (%s,%s)" (loop e) (loop econd))
-	| TSwitch (e,cases,def) ->
-		sprintf "Switch (%s,(%s)%s)" (loop e) (slist (fun (cl,e) -> sprintf "case %s: %s" (slist loop cl) (loop e)) cases) (match def with None -> "" | Some e -> "," ^ loop e)
-	| TPatMatch dt -> s_dt "" (dt.dt_dt_lookup.(dt.dt_first))
-	| TTry (e,cl) ->
-		sprintf "Try %s(%s) " (loop e) (slist (fun (v,e) -> sprintf "catch( %s : %s ) %s" (s_var v) (s_type v.v_type) (loop e)) cl)
-	| TReturn None ->
-		"Return"
-	| TReturn (Some e) ->
-		sprintf "Return %s" (loop e)
-	| TBreak ->
-		"Break"
-	| TContinue ->
-		"Continue"
-	| TThrow e ->
-		"Throw " ^ (loop e)
-	| TCast (e,t) ->
-		sprintf "Cast %s%s" (match t with None -> "" | Some t -> s_type_path (t_path t) ^ ": ") (loop e)
-	| TMeta ((n,el,_),e) ->
-		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.s_expr el)) ^ ")") (loop e)
-	) in
-	sprintf "(%s : %s)" str (s_type e.etype)
-
-and s_dt tabs tree =
-	let s_type = s_type (print_context()) in
-	tabs ^ match tree with
-	| DTSwitch (st,cl,dto) ->
-		"switch(" ^ (s_expr s_type st) ^ ") { \n" ^ tabs
-		^ (String.concat ("\n" ^ tabs) (List.map (fun (c,dt) ->
-			"case " ^ (s_expr s_type c) ^ ":\n" ^ (s_dt (tabs ^ "\t") dt)
-		) cl))
-		^ (match dto with None -> "" | Some dt -> tabs ^ "default: " ^ (s_dt (tabs ^ "\t") dt))
-		^ "\n" ^ (if String.length tabs = 0 then "" else (String.sub tabs 0 (String.length tabs - 1))) ^ "}"
-	| DTBind (bl, dt) -> "bind " ^ (String.concat "," (List.map (fun ((v,_),st) -> v.v_name ^ "(" ^ (string_of_int v.v_id) ^ ") =" ^ (s_expr s_type st)) bl)) ^ "\n" ^ (s_dt tabs dt)
-	| DTGoto i ->
-		"goto " ^ (string_of_int i)
-	| DTExpr e -> s_expr s_type e
-	| DTGuard (e,dt1,dt2) -> "if(" ^ (s_expr s_type e) ^ ") " ^ (s_dt tabs dt1) ^ (match dt2 with None -> "" | Some dt -> " else " ^ (s_dt tabs dt))
-
-let rec s_expr_pretty tabs s_type e =
-	let sprintf = Printf.sprintf in
-	let loop = s_expr_pretty tabs s_type in
-	let slist f l = String.concat "," (List.map f l) in
-	match e.eexpr with
-	| TConst c -> s_const c
-	| TLocal v -> v.v_name
-	| TArray (e1,e2) -> sprintf "%s[%s]" (loop e1) (loop e2)
-	| TBinop (op,e1,e2) -> sprintf "%s %s %s" (loop e1) (s_binop op) (loop e2)
-	| TEnumParameter (e1,_,i) -> sprintf "%s[%i]" (loop e1) i
-	| TField (e1,s) -> sprintf "%s.%s" (loop e1) (field_name s)
-	| TTypeExpr mt -> (s_type_path (t_path mt))
-	| TParenthesis e1 -> sprintf "(%s)" (loop e1)
-	| TObjectDecl fl -> sprintf "{%s}" (slist (fun (f,e) -> sprintf "%s : %s" f (loop e)) fl)
-	| TArrayDecl el -> sprintf "[%s]" (slist loop el)
-	| TCall (e1,el) -> sprintf "%s(%s)" (loop e1) (slist loop el)
-	| TNew (c,pl,el) ->
-		sprintf "new %s(%s)" (s_type_path c.cl_path) (slist loop el)
-	| TUnop (op,f,e) ->
-		(match f with
-		| Prefix -> sprintf "%s %s" (s_unop op) (loop e)
-		| Postfix -> sprintf "%s %s" (loop e) (s_unop op))
-	| TFunction f ->
-		let args = slist (fun (v,o) -> sprintf "%s:%s%s" v.v_name (s_type v.v_type) (match o with None -> "" | Some c -> " = " ^ s_const c)) f.tf_args in
-		sprintf "function(%s) = %s" args (loop f.tf_expr)
-	| TVar (v,eo) ->
-		sprintf "var %s" (sprintf "%s%s" v.v_name (match eo with None -> "" | Some e -> " = " ^ loop e))
-	| TBlock el ->
-		let ntabs = tabs ^ "\t" in
-		let s = sprintf "{\n%s" (String.concat "" (List.map (fun e -> sprintf "%s%s;\n" ntabs (s_expr_pretty ntabs s_type e)) el)) in
-		s ^ tabs ^ "}"
-	| TFor (v,econd,e) ->
-		sprintf "for (%s in %s) %s" v.v_name (loop econd) (loop e)
-	| TIf (e,e1,e2) ->
-		sprintf "if (%s)%s%s)" (loop e) (loop e1) (match e2 with None -> "" | Some e -> " else " ^ loop e)
-	| TWhile (econd,e,flag) ->
-		(match flag with
-		| NormalWhile -> sprintf "while (%s) %s" (loop econd) (loop e)
-		| DoWhile -> sprintf "do (%s) while(%s)" (loop e) (loop econd))
-	| TSwitch (e,cases,def) ->
-		let ntabs = tabs ^ "\t" in
-		let s = sprintf "switch (%s) {\n%s%s" (loop e) (slist (fun (cl,e) -> sprintf "%scase %s: %s\n" ntabs (slist loop cl) (s_expr_pretty ntabs s_type e)) cases) (match def with None -> "" | Some e -> ntabs ^ "default: " ^ (s_expr_pretty ntabs s_type e) ^ "\n") in
-		s ^ tabs ^ "}"
-	| TPatMatch dt -> s_dt tabs (dt.dt_dt_lookup.(dt.dt_first))
-	| TTry (e,cl) ->
-		sprintf "try %s%s" (loop e) (slist (fun (v,e) -> sprintf "catch( %s : %s ) %s" v.v_name (s_type v.v_type) (loop e)) cl)
-	| TReturn None ->
-		"return"
-	| TReturn (Some e) ->
-		sprintf "return %s" (loop e)
-	| TBreak ->
-		"break"
-	| TContinue ->
-		"continue"
-	| TThrow e ->
-		"throw " ^ (loop e)
-	| TCast (e,None) ->
-		sprintf "cast %s" (loop e)
-	| TCast (e,Some mt) ->
-		sprintf "cast (%s,%s)" (loop e) (s_type_path (t_path mt))
-	| TMeta ((n,el,_),e) ->
-		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.s_expr el)) ^ ")") (loop e)

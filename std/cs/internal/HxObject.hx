@@ -33,6 +33,9 @@ private interface IHxObject
 {
 }
 
+#if core_api_serialize
+@:meta(System.Serializable)
+#end
 @:keep @:native('haxe.lang.DynamicObject')
 private class DynamicObject extends HxObject implements Dynamic
 {
@@ -66,15 +69,18 @@ private class DynamicObject extends HxObject implements Dynamic
 
 @:native('haxe.lang.Enum')
 @:keep @:skipCtor
+#if core_api_serialize
+@:meta(System.Serializable)
+#end
 private class Enum
 {
-	@:readOnly private var index:Int;
-	@:readOnly private var params:Array<{}>;
+	@:readOnly private var index(default,never):Int;
+	@:readOnly private var params(default,never):Array<{}>;
 
 	public function new(index:Int, params:Array<{}>)
 	{
-		this.index = index;
-		this.params = params;
+		untyped this.index = index;
+		untyped this.params = params;
 	}
 	@:final public function getTag():String
 	{
