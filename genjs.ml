@@ -1074,7 +1074,7 @@ let ts_type_path_s ref_path c type_params =
 		| _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (ts_type_inst ref_path) type_params)) in
 	Printf.sprintf "%s.%s%s" module_str cl_name_s type_params_s
 
-let ts_field_line ref_path is_static field_name t =
+let rec ts_field_line ctx ref_path is_static field_name t =
 	let static_modifier = if is_static then "static " else "" in
 	match t with
 		| TMono _ -> "$TMono"
@@ -1106,7 +1106,13 @@ let ts_field_line ref_path is_static field_name t =
 					Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path t)
 			) args) in
 			static_modifier ^ field_name ^ "(" ^ args_s ^ "): " ^ (ts_type_inst ref_path ret) ^ ";"
-		| TAnon _ -> "$TAnon"
+		| TAnon ta ->
+				let fields_decl = PMap.foldi (fun a_name a_cf acc ->
+					let s = ts_field_line ctx ref_path false a_name a_cf.cf_type in
+					if acc = "" then s else acc ^ " " ^ s
+				) ta.a_fields ""
+				in
+			  static_modifier ^ field_name ^ ": { " ^ fields_decl ^ " };"
 		| TDynamic _ -> "$TDynamic"
 		| TLazy _ -> "$TLazy"
 		| TAbstract _ -> "$TAbstract"
@@ -1116,7 +1122,7 @@ let gen_ts_class_field ctx c is_static f =
 		(*let pub_modifier = if f.cf_public then "public" else "private" in*)
 		let (module_path, cl_name_s) = c.cl_path in
 		let ref_path = String.concat "." (module_path @ [cl_name_s]) in
-		let s = ts_field_line ref_path is_static f.cf_name f.cf_type in
+		let s = ts_field_line ctx ref_path is_static f.cf_name f.cf_type in
 		print_ts_line ctx s
 	else
 		()
@@ -1388,7 +1394,7 @@ let rec ts_type_decl ctx ref_path t =
 			"(" ^ args_s ^ "): " ^ (ts_type_inst ref_path ret) ^ ";"
 		| TAnon ta ->
 			PMap.foldi (fun a_name a_cf acc ->
-				let s = ts_field_line ref_path false a_name a_cf.cf_type in
+				let s = ts_field_line ctx ref_path false a_name a_cf.cf_type in
 				if acc = "" then s else acc ^ "\n" ^ ctx.ts_def_tabs ^ s
 			) ta.a_fields ""
 		| TDynamic _ -> "$TDynamic"
