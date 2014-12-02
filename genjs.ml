@@ -1032,7 +1032,10 @@ let rec ts_type_inst ref_path t =
 				(match !tref with
 					| Some mono_t -> ts_type_inst ref_path mono_t
 					| _ -> "$TMono")
-		| TEnum _ -> "$TEnum"
+		| TEnum(enum_c, enum_type_params) ->
+				let (e_path, e_name) = enum_c.e_path in
+				let path_s = native_ts_path_s(String.concat "." (e_path @ ["Enum_" ^ e_name])) in
+				path_s
 		| TInst(inst_c, inst_type_params) ->
 				let path_s = native_ts_path_s (rel_ts_path_s ref_path inst_c) in
 				(match inst_type_params with
@@ -1245,9 +1248,47 @@ let generate_class ctx c =
 		newline ctx
 	end
 
+let generate_ts_enum ctx e =
+	let (module_path, e_name_s) = e.e_path in
+	let module_str = String.concat "." module_path in
+	let export_str = if module_str <> "" then "export " else "" in
+	let ref_path = module_str ^ "." ^ e_name_s in
+	print_ts_line ctx (Printf.sprintf "declare module %s {" module_str);
+	ts_entab ctx;
+	let ref_path = String.concat "." (module_path @ [e_name_s]) in
+	let e_keyword_s = "class" in
+	let e_type_params_s = match e.e_params with
+		| [] -> ""
+		| _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (fun (s, t) -> s) e.e_params)) in
+	print_ts_line ctx (export_str ^ e_keyword_s ^ " " ^ e_name_s ^ e_type_params_s ^ " {");
+	ts_entab ctx;
+	List.iter (fun (name) ->
+		let enum_field = PMap.find name e.e_constrs in
+		let args_s = match enum_field.ef_params with
+			| [] -> ""
+			| _ ->
+					Printf.sprintf "(%s)" (String.concat ", " (List.map (fun (param_name, param_t) ->
+						param_name ^ ": " ^ (ts_type_inst ref_path param_t)
+					) enum_field.ef_params))
+		in
+		print_ts_line ctx ("static " ^ name ^ args_s ^ ": " ^ "Enum_" ^ e_name_s ^ ";");
+	) e.e_names;
+	ts_detab ctx;
+	print_ts_line ctx "}";
+	print_ts_line ctx ("export interface Enum_" ^ e_name_s ^ " {");
+	ts_entab ctx;
+	(* We add this phantom field to the enum_$classname interface since TypeScript
+	 * uses structural typing and an empty interface would match everything *)
+	print_ts_line ctx ("__do_not_access_" ^ (String.concat "_" module_path) ^ "_" ^ e_name_s ^ ": number;");
+	ts_detab ctx;
+	print_ts_line ctx "}";
+	ts_detab ctx;
+	print_ts_line ctx "}"
+
 let generate_enum ctx e =
 	let p = s_path ctx e.e_path in
 	let ename = List.map (fun s -> Printf.sprintf "\"%s\"" (Ast.s_escape s)) (fst e.e_path @ [snd e.e_path]) in
+	if Option.is_some !ts_def_file then generate_ts_enum ctx e;
 	if ctx.js_flatten then
 		print ctx "var "
 	else
