@@ -42,8 +42,8 @@ type sourcemap = {
 type ctx = {
 	com : Common.context;
 	buf : Buffer.t;
-  ts_def_buf : Buffer.t;
-  mutable ts_def_tabs : string;
+	ts_def_buf : Buffer.t;
+	mutable ts_def_tabs : string;
 	packages : (string list,unit) Hashtbl.t;
 	smap : sourcemap;
 	js_modern : bool;
@@ -105,7 +105,7 @@ let kwds =
 	h
 
 (* Identifiers Haxe reserves to make the JS output cleaner. These can still be used in untyped code (TLocal),
-   but are escaped upon declaration. *)
+	 but are escaped upon declaration. *)
 let kwds2 =
 	let h = Hashtbl.create 0 in
 	List.iter (fun s -> Hashtbl.add h s ()) [
@@ -171,8 +171,8 @@ let print ctx =
 
 (** Print to the TypeScript declaration buffer *)
 let print_ts ctx =
-  Printf.kprintf (fun s -> begin
-    Buffer.add_string ctx.ts_def_buf s
+	Printf.kprintf (fun s -> begin
+		Buffer.add_string ctx.ts_def_buf s
 end)
 
 let ts_entab ctx = ctx.ts_def_tabs <- ctx.ts_def_tabs ^ "\t"
@@ -998,20 +998,20 @@ let generate_class___name__ ctx c =
  * @param s The Haxe type path string
  *)
 let native_ts_path_s s =
-  match s with
-    | "String" -> "string"
-    | "Void" -> "void"
-    | "Bool" -> "boolean"
-    (* Yu dao zai shuo *)
-    | _ -> s
+	match s with
+		| "String" -> "string"
+		| "Void" -> "void"
+		| "Bool" -> "boolean"
+		(* Yu dao zai shuo *)
+		| _ -> s
 
 (** Get the full type path of a class declaration without any shortening
  * @param c The class declaration
  *)
 let full_ts_path_s c =
-  let (module_path, cl_name_s) = c.cl_path in
-  let module_str = String.concat "." module_path in
-  if module_str = "" then cl_name_s else module_str ^ "." ^ cl_name_s
+	let (module_path, cl_name_s) = c.cl_path in
+	let module_str = String.concat "." module_path in
+	if module_str = "" then cl_name_s else module_str ^ "." ^ cl_name_s
 
 (** Get the type path of a class declaration with respect to a reference class.
  * @param c The class declaration
@@ -1019,42 +1019,42 @@ let full_ts_path_s c =
  * be shortened
  *)
 let rel_ts_path_s ref_path c =
-  let (module_path, cl_name_s) = c.cl_path in
-  let module_str = String.concat "." module_path in
-  if module_str = ref_path then
-    cl_name_s
-  else
-    full_ts_path_s c
+	let (module_path, cl_name_s) = c.cl_path in
+	let module_str = String.concat "." module_path in
+	if module_str = ref_path then
+		cl_name_s
+	else
+		full_ts_path_s c
 
 let rec ts_type_inst ref_path t =
-  match t with
-    | TMono tref ->
-        (match !tref with
-          | Some mono_t -> ts_type_inst ref_path mono_t
-          | _ -> "$TMono")
-    | TEnum _ -> "$TEnum"
-    | TInst(inst_c, inst_type_params) ->
-        let path_s = native_ts_path_s (rel_ts_path_s ref_path inst_c) in
-        (match inst_type_params with
-          | [] -> path_s
-          | _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) inst_type_params)))
-    | TType(t_def, t_type_params) ->
-        let (t_path, t_name) = t_def.t_path in
-        let path_s = native_ts_path_s(String.concat "." (t_path @ [t_name])) in
-        (match t_type_params with
-          | [] -> path_s
-          | _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) t_type_params)))
-    | TFun _ -> "$TFun"
-    | TAnon _ -> "$TAnon"
-    | TDynamic _ -> "$TDynamic"
-    | TLazy _ -> "$TLazy"
-    | TAbstract(tabstract, tparams) ->
-      let (a_path, a_name) = tabstract.a_path in
-      let path_s = native_ts_path_s(String.concat "." (a_path @ [a_name])) in
-      let type_s = match tparams with
-        | [] -> path_s
-        | _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) tparams)) in
-      type_s
+	match t with
+		| TMono tref ->
+				(match !tref with
+					| Some mono_t -> ts_type_inst ref_path mono_t
+					| _ -> "$TMono")
+		| TEnum _ -> "$TEnum"
+		| TInst(inst_c, inst_type_params) ->
+				let path_s = native_ts_path_s (rel_ts_path_s ref_path inst_c) in
+				(match inst_type_params with
+					| [] -> path_s
+					| _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) inst_type_params)))
+		| TType(t_def, t_type_params) ->
+				let (t_path, t_name) = t_def.t_path in
+				let path_s = native_ts_path_s(String.concat "." (t_path @ [t_name])) in
+				(match t_type_params with
+					| [] -> path_s
+					| _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) t_type_params)))
+		| TFun _ -> "$TFun"
+		| TAnon _ -> "$TAnon"
+		| TDynamic _ -> "$TDynamic"
+		| TLazy _ -> "$TLazy"
+		| TAbstract(tabstract, tparams) ->
+			let (a_path, a_name) = tabstract.a_path in
+			let path_s = native_ts_path_s(String.concat "." (a_path @ [a_name])) in
+			let type_s = match tparams with
+				| [] -> path_s
+				| _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) tparams)) in
+			type_s
 
 (** Get the type path of a class declaration together with its type
  * parameters, with respect to a reference class.
@@ -1064,93 +1064,93 @@ let rec ts_type_inst ref_path t =
  * be shortened
  *)
 let ts_type_path_s ref_path c type_params =
-  let (module_path, cl_name_s) = c.cl_path in
-  let module_str = String.concat "." module_path in
-  let type_params_s = match type_params with
-    | [] -> ""
-    | _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (ts_type_inst ref_path) type_params)) in
-  Printf.sprintf "%s.%s%s" module_str cl_name_s type_params_s
+	let (module_path, cl_name_s) = c.cl_path in
+	let module_str = String.concat "." module_path in
+	let type_params_s = match type_params with
+		| [] -> ""
+		| _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (ts_type_inst ref_path) type_params)) in
+	Printf.sprintf "%s.%s%s" module_str cl_name_s type_params_s
 
 let ts_field_line ref_path is_static field_name t =
-  let static_modifier = if is_static then "static " else "" in
-  match t with
-    | TMono _ -> "$TMono"
-    | TEnum _ -> "$TEnum"
-    | TInst(inst_c, inst_type_params) ->
-      let path_s = native_ts_path_s (full_ts_path_s inst_c) in
-      let type_s = match inst_type_params with
-        | [] -> path_s
-        | _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) inst_type_params)) in
-      static_modifier ^ field_name ^ ": " ^ type_s ^ ";"
-    | TType(t_def, t_type_params) ->
-      let (t_path, t_name) = t_def.t_path in
-      let path_s = native_ts_path_s(String.concat "." (t_path @ [t_name])) in
-      let type_s = match t_type_params with
-        | [] -> path_s
-        | _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) t_type_params)) in
-      static_modifier ^ field_name ^ ": " ^ type_s ^ ";"
-    | TFun(args, ret) ->
-      let arg_counter = ref 0 in
-      let args_s = String.concat ", " (List.map (fun (name, opt, t) ->
-        let arg_name = if name <> "" then name else (Printf.sprintf "a%d" !arg_counter) in
-        arg_counter := !arg_counter + 1;
-        if opt then
-          (match t with
-            | TType(t_def, p::ps) ->
-              Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path p)
-            | _ -> "Unhandled $TFun")
-        else
-          Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path t)
-      ) args) in
-      static_modifier ^ field_name ^ "(" ^ args_s ^ "): " ^ (ts_type_inst ref_path ret) ^ ";"
-    | TAnon _ -> "$TAnon"
-    | TDynamic _ -> "$TDynamic"
-    | TLazy _ -> "$TLazy"
-    | TAbstract _ -> "$TAbstract"
+	let static_modifier = if is_static then "static " else "" in
+	match t with
+		| TMono _ -> "$TMono"
+		| TEnum _ -> "$TEnum"
+		| TInst(inst_c, inst_type_params) ->
+			let path_s = native_ts_path_s (full_ts_path_s inst_c) in
+			let type_s = match inst_type_params with
+				| [] -> path_s
+				| _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) inst_type_params)) in
+			static_modifier ^ field_name ^ ": " ^ type_s ^ ";"
+		| TType(t_def, t_type_params) ->
+			let (t_path, t_name) = t_def.t_path in
+			let path_s = native_ts_path_s(String.concat "." (t_path @ [t_name])) in
+			let type_s = match t_type_params with
+				| [] -> path_s
+				| _ -> Printf.sprintf "%s<%s>" path_s (String.concat ", " (List.map (ts_type_inst ref_path) t_type_params)) in
+			static_modifier ^ field_name ^ ": " ^ type_s ^ ";"
+		| TFun(args, ret) ->
+			let arg_counter = ref 0 in
+			let args_s = String.concat ", " (List.map (fun (name, opt, t) ->
+				let arg_name = if name <> "" then name else (Printf.sprintf "a%d" !arg_counter) in
+				arg_counter := !arg_counter + 1;
+				if opt then
+					(match t with
+						| TType(t_def, p::ps) ->
+							Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path p)
+						| _ -> "Unhandled $TFun")
+				else
+					Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path t)
+			) args) in
+			static_modifier ^ field_name ^ "(" ^ args_s ^ "): " ^ (ts_type_inst ref_path ret) ^ ";"
+		| TAnon _ -> "$TAnon"
+		| TDynamic _ -> "$TDynamic"
+		| TLazy _ -> "$TLazy"
+		| TAbstract _ -> "$TAbstract"
 
 let gen_ts_class_field ctx c is_static f =
-  if f.cf_public then
-    (*let pub_modifier = if f.cf_public then "public" else "private" in*)
-    let (module_path, cl_name_s) = c.cl_path in
-    let ref_path = String.concat "." (module_path @ [cl_name_s]) in
-    let s = ts_field_line ref_path is_static f.cf_name f.cf_type in
-    print_ts_line ctx s
-  else
-    ()
+	if f.cf_public then
+		(*let pub_modifier = if f.cf_public then "public" else "private" in*)
+		let (module_path, cl_name_s) = c.cl_path in
+		let ref_path = String.concat "." (module_path @ [cl_name_s]) in
+		let s = ts_field_line ref_path is_static f.cf_name f.cf_type in
+		print_ts_line ctx s
+	else
+		()
 
 (** Generate TypeScript declaration code for a given class.
  * @param ctx The context to generate the code within
  * @param c The class to generate code for
  *)
 let generate_ts_class ctx c =
-  let (module_path, cl_name_s) = c.cl_path in
-  let module_str = String.concat "." module_path in
-  let export_str = if module_str <> "" then "export " else "" in
-  print_ts_line ctx (Printf.sprintf "declare module %s {" module_str);
-  ts_entab ctx;
-  let ref_path = String.concat "." (module_path @ [cl_name_s]) in
-  let cl_keyword_s = if c.cl_interface then "interface" else "class" in
-  let cl_type_params_s = match c.cl_params with
-    | [] -> ""
-    | _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (fun (s, t) -> s) c.cl_params)) in
-  let cl_extends_s = match c.cl_super with
-    | None -> ""
-    | Some (cl, p) -> Printf.sprintf " extends %s" (ts_type_path_s ref_path cl p)
-  in
-  let cl_implements_s = match c.cl_implements with
-    | [] -> ""
-    | _ ->
-      let impl_key = if c.cl_interface then "extends" else "implements" in
-      Printf.sprintf " %s %s" impl_key (String.concat ", " (List.map (fun (cl, p) -> ts_type_path_s ref_path cl p) c.cl_implements))
-  in
-  print_ts_line ctx (export_str ^ cl_keyword_s ^ " " ^ cl_name_s ^ cl_type_params_s ^ cl_extends_s ^ cl_implements_s ^ " {");
-  ts_entab ctx;
-  List.iter (gen_ts_class_field ctx c true) c.cl_ordered_statics;
-  List.iter (gen_ts_class_field ctx c false) c.cl_ordered_fields;
-  ts_detab ctx;
-  print_ts_line ctx "}";
-  ts_detab ctx;
-  print_ts_line ctx "}"
+	let (module_path, cl_name_s) = c.cl_path in
+	let module_str = String.concat "." module_path in
+	let export_str = if module_str <> "" then "export " else "" in
+	print_ts_line ctx (Printf.sprintf "declare module %s {" module_str);
+	ts_entab ctx;
+	let ref_path = String.concat "." (module_path @ [cl_name_s]) in
+	let cl_keyword_s = if c.cl_interface then "interface" else "class" in
+	let cl_type_params_s = match c.cl_params with
+		| [] -> ""
+		| _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (fun (s, t) -> s) c.cl_params)) in
+	let cl_extends_s = match c.cl_super with
+		| None -> ""
+		| Some (cl, p) -> Printf.sprintf " extends %s" (ts_type_path_s ref_path cl p)
+	in
+	let cl_implements_s = match c.cl_implements with
+		| [] -> ""
+		| _ ->
+			let impl_key = if c.cl_interface then "extends" else "implements" in
+			Printf.sprintf " %s %s" impl_key (String.concat ", " (List.map (fun (cl, p) -> ts_type_path_s ref_path cl p) c.cl_implements))
+	in
+	print_ts_line ctx (export_str ^ cl_keyword_s ^ " " ^ cl_name_s ^ cl_type_params_s ^ cl_extends_s ^ cl_implements_s ^ " {");
+	ts_entab ctx;
+	List.iter (gen_ts_class_field ctx c true) c.cl_ordered_statics;
+	List.iter (gen_ts_class_field ctx c false) c.cl_ordered_fields;
+	ts_detab ctx;
+	print_ts_line ctx "}";
+	ts_detab ctx;
+	print_ts_line ctx "}"
 
 let generate_class ctx c =
 	ctx.current <- c;
@@ -1160,7 +1160,7 @@ let generate_class ctx c =
 	| _ -> ());
 	let p = s_path ctx c.cl_path in
 	let hxClasses = has_feature ctx "Type.resolveClass" in
-  if Option.is_some !ts_def_file then generate_ts_class ctx c;
+	if Option.is_some !ts_def_file then generate_ts_class ctx c;
 	if ctx.js_flatten then
 		print ctx "var "
 	else
@@ -1323,87 +1323,87 @@ let generate_require ctx c =
 	newline ctx
 
 let rec ts_type_decl ctx ref_path t =
-  match t with
-    | TMono tref ->
-      (match !tref with
-        | Some mono_t -> ts_type_decl ctx ref_path mono_t
-        | _ -> "$TMono")
-    | TEnum _ -> "$TEnum"
-    | TInst _ -> "$TInst"
-    | TType _ -> "$TType"
-    | TFun(args, ret) ->
-      let arg_counter = ref 0 in
-      let args_s = String.concat ", " (List.map (fun (name, opt, t) ->
-        let arg_name = if name <> "" then name else (Printf.sprintf "a%d" !arg_counter) in
-        arg_counter := !arg_counter + 1;
-        if opt then
-          (match t with
-            | TType(t_def, p::ps) ->
-              Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path p)
-            | _ -> "Unhandled $TFun")
-        else
-          Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path t)
-      ) args) in
-      "(" ^ args_s ^ "): " ^ (ts_type_inst ref_path ret) ^ ";"
-    | TAnon ta ->
-      PMap.foldi (fun a_name a_cf acc ->
-        let s = ts_field_line ref_path false a_name a_cf.cf_type in
-        if acc = "" then s else acc ^ "\n" ^ ctx.ts_def_tabs ^ s
-      ) ta.a_fields ""
-    | TDynamic _ -> "$TDynamic"
-    | TLazy _ -> "$TLazy"
-    | TAbstract _ -> "$TAbstract"
+	match t with
+		| TMono tref ->
+			(match !tref with
+				| Some mono_t -> ts_type_decl ctx ref_path mono_t
+				| _ -> "$TMono")
+		| TEnum _ -> "$TEnum"
+		| TInst _ -> "$TInst"
+		| TType _ -> "$TType"
+		| TFun(args, ret) ->
+			let arg_counter = ref 0 in
+			let args_s = String.concat ", " (List.map (fun (name, opt, t) ->
+				let arg_name = if name <> "" then name else (Printf.sprintf "a%d" !arg_counter) in
+				arg_counter := !arg_counter + 1;
+				if opt then
+					(match t with
+						| TType(t_def, p::ps) ->
+							Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path p)
+						| _ -> "Unhandled $TFun")
+				else
+					Printf.sprintf "%s%s: %s" arg_name (if opt then "?" else "") (ts_type_inst ref_path t)
+			) args) in
+			"(" ^ args_s ^ "): " ^ (ts_type_inst ref_path ret) ^ ";"
+		| TAnon ta ->
+			PMap.foldi (fun a_name a_cf acc ->
+				let s = ts_field_line ref_path false a_name a_cf.cf_type in
+				if acc = "" then s else acc ^ "\n" ^ ctx.ts_def_tabs ^ s
+			) ta.a_fields ""
+		| TDynamic _ -> "$TDynamic"
+		| TLazy _ -> "$TLazy"
+		| TAbstract _ -> "$TAbstract"
 
 let generate_ts_type_decl ctx td =
-  let (t_path, t_name) = td.t_path in
-  let module_str = String.concat "." t_path in
-  let export_str = if module_str <> "" then "export " else "" in
-  let ref_path = String.concat "." (t_path @ [t_name]) in
-  let within_interface f = begin
-    if module_str <> "" then begin
-      print_ts_line ctx (Printf.sprintf "declare module %s {" module_str);
-      ts_entab ctx;
-    end;
-    let t_type_params_s = match td.t_params with
-      | [] -> ""
-      | _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (fun (s, t) -> s) td.t_params)) in
-    print_ts_line ctx (export_str ^ "interface " ^ t_name ^ t_type_params_s ^ " {");
-    ts_entab ctx;
-    f();
-    ts_detab ctx;
-    print_ts_line ctx "}";
-    if module_str <> "" then begin
-      ts_detab ctx;
-      print_ts_line ctx "}";
-    end
-  end in
-  match td.t_type with
-    | TMono tref ->
-      (match !tref with
-        | Some mono_t ->
-          if ref_path <> "Null" && ref_path <> "haxe.PosInfos" then
-            within_interface (fun () -> print_ts_line ctx (ts_type_decl ctx ref_path td.t_type))
-        | _ ->
-          within_interface (fun () -> print_ts_line ctx "$TMono"))
-    | TEnum _ ->
-        within_interface (fun () -> print_ts_line ctx "$TEnum")
-    | TInst _ ->
-        within_interface (fun () -> print_ts_line ctx "$TInst")
-    | TType _ ->
-        within_interface (fun () -> print_ts_line ctx "$TType")
-    | TFun _ ->
-      within_interface (fun () -> print_ts_line ctx "$TFun")
-    | TAnon _ ->
-        within_interface (fun () -> print_ts_line ctx "$TAnon")
-    | TDynamic _ ->
-        within_interface (fun () -> print_ts_line ctx "$TDynamic")
-    | TLazy _ ->
-        within_interface (fun () -> print_ts_line ctx "$TLazy")
-    | TAbstract _ ->
-        within_interface (fun () -> print_ts_line ctx "$TAbstract")
+	let (t_path, t_name) = td.t_path in
+	let module_str = String.concat "." t_path in
+	let export_str = if module_str <> "" then "export " else "" in
+	let ref_path = String.concat "." (t_path @ [t_name]) in
+	let within_interface f = begin
+		if module_str <> "" then begin
+			print_ts_line ctx (Printf.sprintf "declare module %s {" module_str);
+			ts_entab ctx;
+		end;
+		let t_type_params_s = match td.t_params with
+			| [] -> ""
+			| _ -> Printf.sprintf "<%s>" (String.concat ", " (List.map (fun (s, t) -> s) td.t_params)) in
+		print_ts_line ctx (export_str ^ "interface " ^ t_name ^ t_type_params_s ^ " {");
+		ts_entab ctx;
+		f();
+		ts_detab ctx;
+		print_ts_line ctx "}";
+		if module_str <> "" then begin
+			ts_detab ctx;
+			print_ts_line ctx "}";
+		end
+	end in
+	match td.t_type with
+		| TMono tref ->
+			(match !tref with
+				| Some mono_t ->
+					if ref_path <> "Null" && ref_path <> "haxe.PosInfos" then
+						within_interface (fun () -> print_ts_line ctx (ts_type_decl ctx ref_path td.t_type))
+				| _ ->
+					within_interface (fun () -> print_ts_line ctx "$TMono"))
+		| TEnum _ ->
+				within_interface (fun () -> print_ts_line ctx "$TEnum")
+		| TInst _ ->
+				within_interface (fun () -> print_ts_line ctx "$TInst")
+		| TType _ ->
+				within_interface (fun () -> print_ts_line ctx "$TType")
+		| TFun _ ->
+			within_interface (fun () -> print_ts_line ctx "$TFun")
+		| TAnon _ ->
+				within_interface (fun () -> print_ts_line ctx "$TAnon")
+		| TDynamic _ ->
+				within_interface (fun () -> print_ts_line ctx "$TDynamic")
+		| TLazy _ ->
+				within_interface (fun () -> print_ts_line ctx "$TLazy")
+		| TAbstract _ ->
+				within_interface (fun () -> print_ts_line ctx "$TAbstract")
 
 let generate_type_decl ctx td =
-  generate_ts_type_decl ctx td
+	generate_ts_type_decl ctx td
 
 let generate_type ctx = function
 	| TClassDecl c ->
@@ -1429,7 +1429,7 @@ let generate_type ctx = function
 		()
 	| TEnumDecl e -> generate_enum ctx e
 	| TTypeDecl td -> generate_type_decl ctx td
-  | TAbstractDecl _ -> ()
+	| TAbstractDecl _ -> ()
 
 let set_current_class ctx c =
 	ctx.current <- c
@@ -1439,7 +1439,7 @@ let alloc_ctx com =
 		com = com;
 		buf = Buffer.create 16000;
 		ts_def_buf = Buffer.create 16000;
-    ts_def_tabs = "";
+		ts_def_tabs = "";
 		packages = Hashtbl.create 0;
 		smap = {
 			source_last_line = 0;
@@ -1630,10 +1630,10 @@ let generate com =
 		);
 	end;
 	if com.debug then write_mappings ctx else (try Sys.remove (com.file ^ ".map") with _ -> ());
-  ignore(Option.map (fun file ->
-    let ch = open_out_bin file in
-    output_string ch (Buffer.contents ctx.ts_def_buf)
-  ) !ts_def_file);
+	ignore(Option.map (fun file ->
+		let ch = open_out_bin file in
+		output_string ch (Buffer.contents ctx.ts_def_buf)
+	) !ts_def_file);
 	let ch = open_out_bin com.file in
 	output_string ch (Buffer.contents ctx.buf);
 	close_out ch);
