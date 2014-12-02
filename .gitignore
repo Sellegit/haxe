@@ -67,3 +67,8 @@ tests/sys/bin/
 tests/optimization/dump/
 tests/misc/projects/Issue3102/test.n
 tests/unit/bin/
+
+.paths
+.settings
+.project
+tmp_tests/
