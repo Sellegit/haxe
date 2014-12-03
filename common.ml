@@ -58,6 +58,7 @@ type platform =
 	| Cs
 	| Java
 	| Python
+	| Swift
 
 (**
 	The capture policy tells which handling we make of captured locals
@@ -674,6 +675,21 @@ let get_config com =
 			pf_can_skip_non_nullable_argument = true;
 			pf_ignore_unsafe_cast = true;
 		}
+	| Swift ->
+		{
+			pf_static = true;
+			pf_sys = false; (*true;*)
+			pf_locals_scope = false;
+			pf_captured_scope = true;
+			pf_unique_locals = true;
+			pf_capture_policy = CPWrapRef;
+			pf_pad_nulls = true;
+			pf_add_final_return = false;
+			pf_overload = true;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
+			pf_ignore_unsafe_cast = false;
+		}
 
 let memory_marker = [|Unix.time()|]
 
@@ -777,6 +793,7 @@ let platforms = [
 	Cs;
 	Java;
 	Python;
+	Swift;
 ]
 
 let platform_name = function
@@ -790,6 +807,7 @@ let platform_name = function
 	| Cs -> "cs"
 	| Java -> "java"
 	| Python -> "python"
+	| Swift -> "swift"
 
 let flash_versions = List.map (fun v ->
 	let maj = int_of_float v in
