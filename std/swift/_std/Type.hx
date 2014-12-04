@@ -35,6 +35,7 @@ enum ValueType {
 	TUnknown;
 }
 
+@:keep
 @:include("swift/runtime.h")
 @:coreApi
 class Type {

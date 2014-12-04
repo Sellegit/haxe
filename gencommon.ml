@@ -679,7 +679,6 @@ let new_ctx con =
 			cl_reflect = get_cl (get_type con.types ([], "Reflect"));
 			cl_type = get_cl (get_type con.types ([], "Type"));
 			cl_dyn = cl_dyn;
-
 			t_iterator = get_tdef (get_type con.types ([], "Iterator"));
 		};
 		gtools = {

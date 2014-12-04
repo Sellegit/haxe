@@ -16,11 +16,11 @@ INSTALL_LIB_DIR=$(INSTALL_DIR)/lib/haxe
 
 OUTPUT=haxe
 EXTENSION=
-OCAMLOPT=ocamlopt
-OCAMLC=ocamlc
+OCAMLOPT=/usr/local/bin/ocamlopt
+OCAMLC=/usr/local/bin/ocamlc
 LFLAGS=
 
-CFLAGS= -g -I libs/extlib -I libs/extc -I libs/neko -I libs/javalib -I libs/ziplib -I libs/swflib -I libs/xml-light -I libs/ttflib -I libs/ilib -I libs/objsize
+CFLAGS= -g -dtypes -I libs/extlib -I libs/extc -I libs/neko -I libs/javalib -I libs/ziplib -I libs/swflib -I libs/xml-light -I libs/ttflib -I libs/ilib -I libs/objsize
 
 LIBS=unix str libs/extlib/extLib libs/xml-light/xml-light libs/swflib/swflib \
 	libs/extc/extc libs/neko/neko libs/javalib/java libs/ziplib/zip \
@@ -66,7 +66,12 @@ else
 	VERSION_EXTRA="let version_extra = None"
 endif
 
-all: libs haxe
+full: libs haxe test
+
+all: haxe test
+
+test:
+	./haxe -main Hello -cp tmp_tests -swift tmp_tests/
 
 libs:
 	make -C libs/extlib OCAMLOPT=$(OCAMLOPT) OCAMLC=$(OCAMLC) $(TARGET_FLAG)

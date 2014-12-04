@@ -67,4 +67,10 @@ tests/sys/bin/
 tests/optimization/dump/
 tests/misc/projects/Issue3102/test.n
 tests/unit/bin/
-tmp_tests/
+tmp_tests/cs/
+tmp_tests/src/
+tmp_tests/hello.js
+.paths
+.settings
+*.annot
+.paths
