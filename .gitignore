@@ -65,8 +65,9 @@ tests/unit/unit.py.res2.bin
 *.cmo
 tests/sys/bin/
 tests/optimization/dump/
-tests/misc/projects/Issue3102/test.n
+tests/misc/projects/*/*.n
 tests/unit/bin/
+<<<<<<< HEAD
 tmp_tests/cs/
 tmp_tests/java/
 tmp_tests/src/
@@ -76,3 +77,4 @@ tmp_tests/hello.js
 *.annot
 .paths
 TODO.md
+tests/*.n

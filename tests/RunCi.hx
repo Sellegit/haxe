@@ -4,6 +4,7 @@ import yaml.*;
 
 import sys.*;
 import sys.io.*;
+import haxe.*;
 import haxe.io.*;
 
 private typedef TravisConfig = {
@@ -69,11 +70,15 @@ class RunCi {
 
 		while (trials-->0) {
 			Sys.println('Command: $cmd $args');
+
+			var t = Timer.stamp();
 			exitCode = Sys.command(cmd, args);
+			var dt = Math.round(Timer.stamp() - t);
+
 			if (exitCode == 0)
-				successMsg('Command exited with $exitCode: $cmd $args');
+				successMsg('Command exited with $exitCode in ${dt}s: $cmd $args');
 			else
-				failMsg('Command exited with $exitCode: $cmd $args');
+				failMsg('Command exited with $exitCode in ${dt}s: $cmd $args');
 
 			if (exitCode == 0) {
 				return;
@@ -212,6 +217,16 @@ class RunCi {
 		Sys.exit(1);
 	}
 
+	static function runExe(exe:String):Void {
+		exe = FileSystem.fullPath(exe);
+		switch (systemName) {
+			case "Linux", "Mac":
+				runCommand("mono", [exe]);
+			case "Windows":
+				runCommand(exe, []);
+		}
+	}
+
 	static function parseCommand(cmd:String) {
 		var args = [];
 		var offset = 0;
@@ -302,6 +317,8 @@ class RunCi {
 		//install and build hxcpp
 		haxelibInstallGit("HaxeFoundation", "hxcpp", true);
 		var oldDir = Sys.getCwd();
+		changeDirectory(Sys.getEnv("HOME") + "/haxelib/hxcpp/git/tools/hxcpp/");
+		runCommand("haxe", ["compile.hxml"]);
 		changeDirectory(Sys.getEnv("HOME") + "/haxelib/hxcpp/git/project/");
 		runCommand("neko", ["build.n"]);
 		changeDirectory(oldDir);
@@ -330,10 +347,13 @@ class RunCi {
 		switch (systemName) {
 			case "Linux":
 				runCommand("sudo", ["apt-get", "install", "mono-devel", "mono-mcs", "-qq"], true);
+				runCommand("mono", ["--version"]);
 			case "Mac":
 				runCommand("brew", ["install", "mono"], true);
+				runCommand("mono", ["--version"]);
+			case "Windows":
+				//pass
 		}
-		runCommand("mono", ["--version"]);
 
 		haxelibInstallGit("HaxeFoundation", "hxcs", true);
 	}
@@ -392,7 +412,6 @@ class RunCi {
 	static var miscDir(default, never) = cwd + "misc/";
 
 	static function main():Void {
-		changeDirectory(unitDir);
 		Sys.putEnv("OCAMLRUNPARAM", "b");
 
 		var args = ["foo", "12", "a b  %PATH% $HOME c\\&<>[\"]#{}|%$"];
@@ -403,10 +422,13 @@ class RunCi {
 			case TravisCI:
 				[Sys.getEnv("TEST")];
 			case AppVeyor:
-				[Macro, Neko];
+				[Macro, Neko, Cs];
 		}
+		Sys.println('Going to test: $tests');
 
 		for (test in tests) {
+			infoMsg('Now test $test');
+			changeDirectory(unitDir);
 			switch (test) {
 				case Macro:
 					runCommand("haxe", ["compile-macro.hxml"]);
@@ -516,11 +538,21 @@ class RunCi {
 				case Cs:
 					getCsDependencies();
 
-					runCommand("haxe", ["compile-cs-travis.hxml"]);
-					runCommand("mono", ["bin/cs/bin/Test-Debug.exe"]);
+					switch (ci) {
+						case TravisCI:
+							runCommand("haxe", ["compile-cs-travis.hxml"]);
+							runExe("bin/cs/bin/Test-Debug.exe");
 
-					runCommand("haxe", ["compile-cs-unsafe.hxml"]);
-					runCommand("mono", ["bin/cs_unsafe/bin/Test-Debug.exe"]);
+							runCommand("haxe", ["compile-cs-unsafe-travis.hxml"]);
+							runExe("bin/cs_unsafe/bin/Test-Debug.exe");
+						case AppVeyor, null:
+							runCommand("haxe", ["compile-cs.hxml"]);
+							runExe("bin/cs/bin/Test-Debug.exe");
+
+							runCommand("haxe", ["compile-cs-unsafe.hxml"]);
+							runExe("bin/cs_unsafe/bin/Test-Debug.exe");
+					}
+					
 				case Flash9:
 					setupFlashPlayerDebugger();
 					runCommand("haxe", ["compile-flash9.hxml", "-D", "fdb"]);
