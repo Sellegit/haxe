@@ -76,5 +76,4 @@ tmp_tests/hello.js
 .settings
 *.annot
 .paths
-TODO.md
 tests/*.n
